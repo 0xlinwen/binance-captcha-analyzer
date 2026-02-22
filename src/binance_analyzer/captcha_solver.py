@@ -1,7 +1,5 @@
 import random
 import time
-import json
-import fcntl
 from pathlib import Path
 
 from .captcha_ai import (
@@ -11,50 +9,26 @@ from .captcha_ai import (
     screenshot_to_base64,
 )
 
-# OpenCV 本地匹配模块
-try:
-    from .slider_cv import (
-        pixel_verified_solve,
-        bytes_to_cv_image,
-        extract_background_image,
-        PUZZLE_PIECE_WIDTH,
-    )
-    CV_AVAILABLE = True
-except ImportError:
-    CV_AVAILABLE = False
-    print("[WARNING] OpenCV 模块未安装，将仅使用 AI 识别")
-
-SLIDER_OFFSET_PX = 0
 FAST_DRAG_STEPS = 2
 MAX_COOLDOWN_SECONDS = 5
-SLIDER_OFFSET_MIN = -30
-SLIDER_OFFSET_MAX = 30
-# 本地 CV 匹配的置信度阈值
-CV_CONFIDENCE_THRESHOLD = 0.3
-SLIDER_OFFSET_FILE = Path(__file__).resolve().parents[2] / "output" / "slider_offset.json"
-SLIDER_OFFSET_LOCK = Path(__file__).resolve().parents[2] / "output" / "slider_offset.lock"
+DEBUG_DIR = Path(__file__).resolve().parents[2] / "debug"
+AI_RETRY_COUNT = 3  # AI 调用重试次数
+AI_RETRY_DELAY = 1  # AI 重试间隔（秒）
 
 
-def _load_learned_slider_offset():
-    try:
-        if not SLIDER_OFFSET_FILE.exists():
-            return 0
-        data = json.loads(SLIDER_OFFSET_FILE.read_text(encoding="utf-8"))
-        return int(data.get("offset_px", 0))
-    except Exception:
-        return 0
-
-
-def _save_learned_slider_offset(offset_px):
-    offset_px = max(SLIDER_OFFSET_MIN, min(SLIDER_OFFSET_MAX, int(offset_px)))
-    SLIDER_OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(SLIDER_OFFSET_LOCK, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+def _call_ai_with_retry(api_func, *args, max_retries=AI_RETRY_COUNT, **kwargs):
+    """带重试的 AI 调用封装"""
+    last_error = None
+    for attempt in range(max_retries):
         try:
-            payload = {"offset_px": offset_px}
-            SLIDER_OFFSET_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            result = api_func(*args, **kwargs)
+            return result
+        except Exception as e:
+            last_error = e
+            print(f"[AI] 调用失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(AI_RETRY_DELAY)
+    raise last_error
 
 
 def _captcha_gone_stably(page, checks=3, interval_ms=250):
@@ -313,7 +287,6 @@ def solve_captcha(
     cooldown_min_sec=20,
     cooldown_max_sec=60,
     click_retry_per_cell=3,
-    auto_tune_slider_offset=True,
 ):
     model_candidates = model if isinstance(model, (list, tuple)) else [model]
     model_candidates = [m for m in model_candidates if m]
@@ -321,8 +294,6 @@ def solve_captcha(
         raise ValueError("models 配置为空，无法识别验证码")
     primary_model = model_candidates[0]
     fast_mode = retry_mode == "fast"
-    auto_tune = bool(auto_tune_slider_offset)
-    learned_offset = _load_learned_slider_offset() if auto_tune else 0
     rate_limit_signatures = [
         "too_many_attempts",
         "尝试次数过多",
@@ -338,7 +309,7 @@ def solve_captcha(
             try:
                 print(f"进入第 {round_idx + 1}/{max_rounds} 轮，重开登录页: {reload_url}")
                 page.goto(reload_url, wait_until="domcontentloaded", timeout=page_timeout)
-                page.wait_for_timeout(random.randint(1200, 1800) if fast_mode else random.randint(2200, 3000))
+                page.wait_for_timeout(1000)  # 固定等待1秒
             except Exception as e:
                 print(f"重开登录页失败: {e}")
                 continue
@@ -346,7 +317,7 @@ def solve_captcha(
         for attempt in range(max_attempts):
             print(f"\n--- 验证码轮次 {round_idx + 1}/{max_rounds}，尝试 {attempt + 1}/{max_attempts} ---")
             if attempt > 0:
-                time.sleep(random.uniform(0.1, 0.3) if fast_mode else random.uniform(0.5, 1.0))
+                time.sleep(0.2)  # 固定短暂等待
             dismiss_global_modal(page)
 
             page_text = page.inner_text("body") if page.query_selector("body") else ""
@@ -375,7 +346,7 @@ def solve_captcha(
                 screenshot_bytes = captcha_element.screenshot()
                 screenshot_base64 = screenshot_to_base64(screenshot_bytes)
                 try:
-                    result = analyze_click_captcha(api_key, primary_model, screenshot_base64, prompt_text)
+                    result = _call_ai_with_retry(analyze_click_captcha, api_key, primary_model, screenshot_base64, prompt_text)
                     positions = parse_json_response(result).get("positions", [])
                     if not positions:
                         print("[WARNING] 点击验证码未识别到有效位置，进入下一次尝试")
@@ -386,7 +357,7 @@ def solve_captcha(
                         print("[WARNING] 点击验证码本轮未成功点击任何格子，进入下一次尝试")
                         continue
 
-                    page.wait_for_timeout(random.randint(500, 800) if fast_mode else random.randint(800, 1200))
+                    page.wait_for_timeout(500)  # 固定等待
 
                     verify_clicked = False
                     verify_selectors = [
@@ -417,7 +388,7 @@ def solve_captcha(
                         except Exception:
                             pass
 
-                    page.wait_for_timeout(random.randint(600, 900) if fast_mode else random.randint(1000, 1500))
+                    page.wait_for_timeout(800)  # 固定等待
                     # 验证码稳定消失才判定通过
                     if _captcha_gone_stably(page):
                         return True
@@ -509,7 +480,7 @@ def solve_captcha(
 
                         # 每次拟合都重新截图
                         if fit_attempt > 0:
-                            page.wait_for_timeout(random.randint(500, 800))
+                            page.wait_for_timeout(500)  # 固定等待
                             slider_bg_new = page.query_selector(".bs-main-image, [class*='slider-bg'], [class*='captcha-bg'], .bcap-bg, [class*='verify-img']")
                             if slider_bg_new:
                                 screenshot_bytes = slider_bg_new.screenshot()
@@ -522,12 +493,12 @@ def solve_captcha(
 
                         # 保存原始背景图到 debug
                         try:
-                            from .slider_cv import bytes_to_cv_image, ensure_debug_dir, DEBUG_DIR
                             import cv2 as _cv2
                             import numpy as _np
 
-                            ensure_debug_dir()
-                            bg_img = bytes_to_cv_image(screenshot_bytes)
+                            DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+                            nparr = _np.frombuffer(screenshot_bytes, _np.uint8)
+                            bg_img = _cv2.imdecode(nparr, _cv2.IMREAD_UNCHANGED)
                             if bg_img is not None:
                                 _cv2.imwrite(str(DEBUG_DIR / f"{debug_prefix}_fit{fit_attempt+1}_bg.png"), bg_img)
 
@@ -559,7 +530,7 @@ def solve_captcha(
                         # AI 识别
                         print("[AI] 调用 AI 识别缺口位置...")
                         try:
-                            ai_result = analyze_slider_captcha(api_key, primary_model, screenshot_base64, image_width)
+                            ai_result = _call_ai_with_retry(analyze_slider_captcha, api_key, primary_model, screenshot_base64, image_width)
                             ai_data = parse_json_response(ai_result)
                             ai_gap_x = int(ai_data.get("gap_x", 0))
                             ai_puzzle_x = int(ai_data.get("puzzle_x", 0))
@@ -657,7 +628,7 @@ def solve_captcha(
                 except Exception as e:
                     print(f"识别失败: {e}")
 
-            page.wait_for_timeout(random.randint(500, 900) if fast_mode else random.randint(1000, 1500))
+            page.wait_for_timeout(500)  # 固定等待
 
     print("验证码尝试次数已用完")
     return False
@@ -689,6 +660,5 @@ def solve_captcha_if_present(
             cooldown_min_sec=captcha_config.get("cooldown_on_risk_min_sec", 20),
             cooldown_max_sec=captcha_config.get("cooldown_on_risk_max_sec", 60),
             click_retry_per_cell=captcha_config.get("click_retry_per_cell", 3),
-            auto_tune_slider_offset=captcha_config.get("auto_tune_slider_offset", True),
         )
     return True
