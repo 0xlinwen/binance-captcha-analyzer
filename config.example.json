@@ -1,11 +1,13 @@
 {
   "openrouter_api_key": "your_openrouter_api_key_here",
-  "models": ["google/gemini-2.0-flash-001"],
+  "models": [
+    "google/gemini-3-flash-preview"
+  ],
   "imap_host": "imap.example.com",
   "imap_port": 993,
   "accounts_file": "accounts.txt",
   "output_file": "output/registered_accounts.json",
-  "max_workers": 1,
+  "max_workers": 2,
   "headless": false,
   "proxy": {
     "enabled": false,
@@ -16,14 +18,23 @@
   "login": {
     "start_url": "https://accounts.binance.com/zh-CN/login"
   },
-  "browser": {
-    "channel": "chrome",
-    "persistent_profile_dir": "output/chrome_profile",
-    "minimal_stealth": true
-  },
   "captcha": {
     "retry_mode": "fast",
-    "max_attempts_per_round": 5,
-    "max_rounds": 3
+    "max_attempts_per_round": 3,
+    "max_rounds": 2,
+    "cooldown_on_risk_min_sec": 20,
+    "cooldown_on_risk_max_sec": 60,
+    "click_retry_per_cell": 3,
+    "auto_tune_slider_offset": true
+  },
+  "mfa": {
+    "submit_retry": 2,
+    "not_registered_keywords": [
+      "未注册",
+      "账号不存在",
+      "account does not exist",
+      "not registered",
+      "没有账号"
+    ]
   }
 }
