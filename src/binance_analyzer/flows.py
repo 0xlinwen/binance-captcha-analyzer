@@ -64,6 +64,29 @@ RISK_SIGNATURES = [
 ]
 
 
+def _is_page_blank(page, logger=None):
+    """检测页面是否白屏"""
+    try:
+        body = page.query_selector("body")
+        if not body:
+            return True
+        text = body.inner_text().strip()
+        # 白屏：body 为空或只有很少内容
+        if len(text) < 50:
+            # 再检查是否有可见元素
+            visible_elements = page.query_selector_all("button, input, a, img")
+            visible_count = sum(1 for el in visible_elements if el.is_visible())
+            if visible_count < 3:
+                if logger:
+                    logger.debug(f"检测到白屏: text_len={len(text)}, visible_elements={visible_count}")
+                return True
+        return False
+    except Exception as e:
+        if logger:
+            logger.debug(f"_is_page_blank 异常: {e}")
+        return False
+
+
 def _has_risk_error(page, logger=None):
     """检查页面是否有风控错误"""
     try:
@@ -186,6 +209,14 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             msg = f"迭代 {iteration + 1} 当前 URL: {url}"
             print(f"\n[迭代 {iteration + 1}] 当前 URL: {url}")
             logger.info(msg)
+
+            # 检测白屏
+            if _is_page_blank(page, logger):
+                print("[WARNING] 检测到白屏，刷新页面...")
+                logger.warning("检测到白屏，刷新页面")
+                page.reload()
+                page.wait_for_timeout(2000)
+                continue
 
             has_risk, body_text = _has_risk_error(page, logger)
             if has_risk:
@@ -540,6 +571,15 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
         page.wait_for_timeout(1000)  # 固定等待1秒
         url = page.url
         print(f"\n[注册迭代 {iteration + 1}] 当前 URL: {url}")
+        logger.info(f"注册迭代 {iteration + 1} 当前 URL: {url}")
+
+        # 检测白屏
+        if _is_page_blank(page, logger):
+            print("[WARNING] 检测到白屏，刷新页面...")
+            logger.warning("检测到白屏，刷新页面")
+            page.reload()
+            page.wait_for_timeout(2000)
+            continue
 
         if "/invite" in url:
             print("[状态] invite - 点击下一步")
