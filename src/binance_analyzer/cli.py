@@ -16,16 +16,7 @@ def process_account(args):
     base_dir, account, config, index = args
     email_addr, password = account
 
-    runtime_cfg = config.get("runtime", {})
-    delay_min = float(runtime_cfg.get("start_delay_min_sec", 8))
-    delay_max = float(runtime_cfg.get("start_delay_max_sec", 20))
-
-    # index=0 可立即启动，其余随机错峰
-    if index > 0:
-        delay = random.uniform(delay_min, delay_max)
-        print(f"[{email_addr}] 等待 {delay:.1f} 秒后启动...")
-        time.sleep(delay)
-
+    # 不再等待，直接启动
     try:
         return email_addr, register_account(base_dir, email_addr, password, config)
     except Exception as e:

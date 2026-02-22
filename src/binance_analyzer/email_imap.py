@@ -149,27 +149,68 @@ def handle_email_verification(
     mfa_submit_retry=2,
     consumed_codes=None,
 ):
+    # 等待页面加载完成
+    page.wait_for_timeout(1500)
+
     code_input_selectors = [
         "input[maxlength='6']",
         "input[autocomplete='one-time-code']",
         "input[placeholder*='验证']",
         "input[placeholder*='code']",
+        "input[placeholder*='Code']",
         "input[type='tel']",
+        "input[type='number']",
+        "input[data-e2e*='code']",
+        "input[data-e2e*='otp']",
+        "input[name*='code']",
+        "input[name*='otp']",
+        "input[id*='code']",
+        "input[id*='otp']",
+        "[class*='code'] input",
+        "[class*='otp'] input",
+        "[class*='verification'] input",
     ]
 
     code_input = None
-    for selector in code_input_selectors:
-        try:
-            el = page.query_selector(selector)
-            if el and el.is_visible():
-                code_input = el
-                print(f"找到验证码输入框: {selector}")
-                break
-        except Exception:
-            pass
+    # 尝试多次查找，等待元素出现
+    for retry in range(5):
+        for selector in code_input_selectors:
+            try:
+                el = page.query_selector(selector)
+                if el and el.is_visible():
+                    code_input = el
+                    print(f"找到验证码输入框: {selector}")
+                    break
+            except Exception:
+                pass
+        if code_input:
+            break
+        print(f"等待验证码输入框出现... ({retry + 1}/5)")
+        page.wait_for_timeout(1000)
 
     if not code_input:
-        print("未找到验证码输入框")
+        # 打印页面上所有 input 元素帮助调试
+        print("[DEBUG] 未找到验证码输入框，列出页面所有 input 元素:")
+        try:
+            inputs = page.query_selector_all("input")
+            for i, inp in enumerate(inputs[:10]):
+                try:
+                    attrs = inp.evaluate("""el => {
+                        return {
+                            type: el.type,
+                            name: el.name,
+                            id: el.id,
+                            placeholder: el.placeholder,
+                            maxlength: el.maxLength,
+                            class: el.className,
+                            visible: el.offsetParent !== null
+                        }
+                    }""")
+                    print(f"  input[{i}]: {attrs}")
+                except:
+                    pass
+        except:
+            pass
         return False
 
     email_code = get_email_verification_code(
