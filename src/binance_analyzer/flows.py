@@ -266,16 +266,20 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     consumed_codes=consumed_codes,
                 )
                 if not ok:
-                    print("[DEBUG] 邮件验证失败")
-                    logger.debug("邮件验证失败")
-                    return False
+                    print("[WARNING] 邮件验证失败，刷新页面重试...")
+                    logger.warning("邮件验证失败，刷新页面重试")
+                    page.reload()
+                    page.wait_for_timeout(2000)
+                    continue
             except Exception as e:
                 print(f"[DEBUG] handle_email_verification 异常: {e}")
                 logger.debug(f"handle_email_verification 异常: {e}")
                 import traceback
                 print(f"[DEBUG] 堆栈: {traceback.format_exc()}")
                 logger.debug(f"堆栈: {traceback.format_exc()}")
-                return False
+                page.reload()
+                page.wait_for_timeout(2000)
+                continue
 
             page.wait_for_timeout(random.randint(2200, 3200))
             url_after = page.url

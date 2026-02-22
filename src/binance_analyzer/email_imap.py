@@ -150,7 +150,7 @@ def handle_email_verification(
     consumed_codes=None,
 ):
     # 等待页面加载完成
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)
 
     code_input_selectors = [
         "input[maxlength='6']",
@@ -171,22 +171,46 @@ def handle_email_verification(
         "[class*='verification'] input",
     ]
 
-    code_input = None
-    # 尝试多次查找，等待元素出现
-    for retry in range(5):
+    def _find_code_input():
+        """在主页面和 iframe 中查找验证码输入框"""
+        # 先在主页面查找
         for selector in code_input_selectors:
             try:
                 el = page.query_selector(selector)
                 if el and el.is_visible():
-                    code_input = el
-                    print(f"找到验证码输入框: {selector}")
-                    break
+                    return el, page
             except Exception:
                 pass
+
+        # 在 iframe 中查找
+        try:
+            frames = page.frames
+            for frame in frames:
+                if frame == page.main_frame:
+                    continue
+                for selector in code_input_selectors:
+                    try:
+                        el = frame.query_selector(selector)
+                        if el and el.is_visible():
+                            print(f"[DEBUG] 在 iframe 中找到验证码输入框: {frame.url}")
+                            return el, frame
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return None, None
+
+    code_input = None
+    code_frame = None
+    # 尝试多次查找，等待元素出现
+    for retry in range(10):
+        code_input, code_frame = _find_code_input()
         if code_input:
+            print(f"找到验证码输入框")
             break
-        print(f"等待验证码输入框出现... ({retry + 1}/5)")
-        page.wait_for_timeout(1000)
+        print(f"等待验证码输入框出现... ({retry + 1}/10)")
+        page.wait_for_timeout(1500)
 
     if not code_input:
         # 打印页面上所有 input 元素帮助调试
@@ -229,14 +253,7 @@ def handle_email_verification(
     # 重新查找输入框（等待邮件期间页面可能刷新）
     code_input = None
     for retry in range(3):
-        for selector in code_input_selectors:
-            try:
-                el = page.query_selector(selector)
-                if el and el.is_visible():
-                    code_input = el
-                    break
-            except Exception:
-                pass
+        code_input, code_frame = _find_code_input()
         if code_input:
             break
         page.wait_for_timeout(500)
