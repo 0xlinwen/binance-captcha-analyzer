@@ -29,13 +29,10 @@ FAST_DRAG_STEPS = 2
 MAX_COOLDOWN_SECONDS = 5
 SLIDER_OFFSET_MIN = -30
 SLIDER_OFFSET_MAX = 30
-LOCAL_SIM_ROUNDS = 7
 # 本地 CV 匹配的置信度阈值
 CV_CONFIDENCE_THRESHOLD = 0.3
 SLIDER_OFFSET_FILE = Path(__file__).resolve().parents[2] / "output" / "slider_offset.json"
 SLIDER_OFFSET_LOCK = Path(__file__).resolve().parents[2] / "output" / "slider_offset.lock"
-SLIDER_MODEL_STATS_FILE = Path(__file__).resolve().parents[2] / "output" / "slider_model_stats.json"
-SLIDER_MODEL_STATS_LOCK = Path(__file__).resolve().parents[2] / "output" / "slider_model_stats.lock"
 
 
 def _load_learned_slider_offset():
@@ -60,81 +57,15 @@ def _save_learned_slider_offset(offset_px):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _load_model_stats():
-    try:
-        if not SLIDER_MODEL_STATS_FILE.exists():
-            return {}
-        return json.loads(SLIDER_MODEL_STATS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_model_stats(stats):
-    SLIDER_MODEL_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(SLIDER_MODEL_STATS_LOCK, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            current = _load_model_stats()
-            current.update(stats)
-            SLIDER_MODEL_STATS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-def _update_model_stats(model_name, success=False):
-    stats = _load_model_stats()
-    item = stats.get(model_name, {"attempts": 0, "success": 0, "rate": 0.0})
-    item["attempts"] += 1
-    if success:
-        item["success"] += 1
-    item["rate"] = round(item["success"] / max(1, item["attempts"]), 4)
-    stats[model_name] = item
-    _save_model_stats(stats)
-
-
-def _get_best_model():
-    stats = _load_model_stats()
-    if not stats:
-        return None, None
-    best_model, best = max(stats.items(), key=lambda kv: (kv[1].get("rate", 0.0), kv[1].get("success", 0)))
-    return best_model, best
-
-
-def _build_local_distance_candidates(gap_x, puzzle_x, learned_offset, image_width):
-    """Keep a single baseline distance; browser execution must run once per model."""
-    base_distance = int(gap_x - puzzle_x + SLIDER_OFFSET_PX + learned_offset)
-    max_distance = max(0, int(image_width) - 1)
-    c = max(0, min(max_distance, int(base_distance)))
-    return [c]
-
-
-def _local_simulate_model_plan(model_name, gap_x, puzzle_x, learned_offset, image_width):
-    """Pure local planning stage (no browser action), with multi-round simulation logs."""
-    baseline = _build_local_distance_candidates(gap_x, puzzle_x, learned_offset, image_width)[0]
-    max_distance = max(0, int(image_width) - 1)
-
-    # Deterministic local simulation offsets around puzzle estimate.
-    # Only local virtual trials, never browser actions.
-    virtual_puzzle_offsets = [0, 1, -1, 2, -2, 3, -3][:LOCAL_SIM_ROUNDS]
-    simulated = []
-    for i, po in enumerate(virtual_puzzle_offsets, start=1):
-        virtual_puzzle = puzzle_x + po
-        distance = int(gap_x - virtual_puzzle + SLIDER_OFFSET_PX + learned_offset)
-        distance = max(0, min(max_distance, distance))
-        # Lower score is better; prefer closer to baseline and avoid edge saturation.
-        edge_penalty = 1 if distance in (0, max_distance) else 0
-        score = abs(distance - baseline) + edge_penalty
-        simulated.append({"round": i, "distance": distance, "score": score, "virtual_puzzle": virtual_puzzle})
-
-    simulated_sorted = sorted(simulated, key=lambda x: (x["score"], x["round"]))
-    final = simulated_sorted[0]
-    return {
-        "model": model_name,
-        "baseline": baseline,
-        "simulated": simulated,
-        "final_distance": final["distance"],
-        "final_score": final["score"],
-    }
+def _captcha_gone_stably(page, checks=3, interval_ms=250):
+    """Confirm captcha is absent across multiple checks to avoid transient false positives."""
+    for idx in range(max(1, checks)):
+        captcha_type, _ = detect_captcha_type(page)
+        if captcha_type != "unknown":
+            return False
+        if idx < checks - 1:
+            page.wait_for_timeout(interval_ms)
+    return True
 
 
 def simulate_human_drag(page, slider_element, distance):
@@ -431,8 +362,12 @@ def solve_captcha(
 
             captcha_type, captcha_element = detect_captcha_type(page)
             if captcha_type == "unknown":
-                print("未检测到验证码，可能已通过")
-                return True
+                print("未检测到验证码，进行稳定性确认...")
+                if _captcha_gone_stably(page):
+                    print("验证码已稳定消失，判定通过")
+                    return True
+                print("验证码可能仍在或短暂重绘，继续尝试")
+                continue
 
             if captcha_type == "click":
                 prompt_element = page.query_selector("#tagLabel, .bcap-text-message-title2")
@@ -483,8 +418,8 @@ def solve_captcha(
                             pass
 
                     page.wait_for_timeout(random.randint(600, 900) if fast_mode else random.randint(1000, 1500))
-                    # 若弹窗消失则通过；若仍存在则等待新验证码加载完成
-                    if not page.query_selector(".bcap-modal"):
+                    # 验证码稳定消失才判定通过
+                    if _captcha_gone_stably(page):
                         return True
 
                     # 第二轮验证码：等待新验证码完全加载
@@ -680,8 +615,8 @@ def solve_captcha(
                             print("[AI] 滑动执行失败")
                             break
 
-                        # 检查验证码是否消失（滑动函数内部已等待1-3秒）
-                        if not page.query_selector(".bs-modal, .bcapc-popup"):
+                        # 使用统一检测逻辑，避免选择器覆盖不全导致误判
+                        if _captcha_gone_stably(page):
                             print("[AI] 滑块验证码通过!")
                             return True
                         else:
@@ -715,8 +650,7 @@ def solve_captcha(
                                 print("[保底] 滑动执行失败")
                                 continue
 
-                            # 检查验证码是否消失（滑动函数内部已等待1-3秒）
-                            if not page.query_selector(".bs-modal, .bcapc-popup"):
+                            if _captcha_gone_stably(page):
                                 print("[保底] 滑块验证码通过!")
                                 return True
 

@@ -181,6 +181,9 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             if captcha_result == "rate_limited":
                 print("[ERROR] IP 被风控，请更换代理或等待后重试")
                 return "rate_limited"
+            if captcha_result is False:
+                print("[ERROR] 验证码处理失败")
+                return False
 
             # 验证码处理后再次检查URL
             url = _check_url_change(page, url, "验证码处理", 500)
@@ -205,7 +208,17 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 print("[ERROR] IP 被风控，请更换代理或等待后重试")
                 return "rate_limited"
             if captcha_result is not True:
+                if captcha_result is False:
+                    print("[ERROR] 验证码处理失败")
+                    return False
                 url = _check_url_change(page, url_before, "验证码处理", 500)
+                continue
+
+            # 验证码处理成功后，检查URL是否已经跳转
+            url = _check_url_change(page, url_before, "验证码处理", 500)
+            if url != url_before:
+                # URL已经变化，跳到下一次迭代处理新的URL状态
+                print(f"[状态] 验证码处理后URL已变化，进入新状态: {url}")
                 continue
 
             email_input = page.query_selector("input[data-e2e='input-username'], input[name='username'], input[name='email']")
@@ -217,24 +230,21 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 if current_value and email_addr in current_value:
                     print("[状态] 邮箱已输入，点击继续...")
                     click_login_continue_strict(page)
-                    url = _check_url_change(page, url_before, "点击继续", 2500)
 
-                    # 检查是否有验证码
-                    captcha_type, _ = detect_captcha_type(page)
-                    if captcha_type == "unknown":
-                        # 没有验证码，检查URL是否变化
-                        if url == url_before or ("/login" in url and "/login/" not in url):
-                            # URL没变化或仍在登录页，可能是未注册
-                            print("[状态] 点击继续后无验证码且URL未变化，检查是否未注册...")
-                            if need_register(page):
-                                print("[状态] 检测到账号未注册")
-                                return "need_register"
-                            # 等待一下再检查
-                            page.wait_for_timeout(1000)
-                            url_after_wait = page.url
-                            if url_after_wait == url:
-                                print("[状态] 等待后URL仍未变化，判定为未注册")
-                                return "need_register"
+                    # 点击后等待1-3秒
+                    wait_time = random.uniform(1000, 3000)
+                    print(f"[等待] 点击继续后等待 {wait_time/1000:.1f}秒...")
+                    page.wait_for_timeout(int(wait_time))
+
+                    # 检查并点击"已知晓"按钮
+                    _dismiss_error_popup(page)
+
+                    url = _check_url_change(page, url_before, "点击继续", 500)
+
+                    # 检查页面是否提示未注册
+                    if need_register(page):
+                        print("[状态] 页面提示账号未注册，跳转到注册流程")
+                        return "need_register"
 
                     if "/login/password" not in url and "/login/mfa" not in url and "/my/" not in url:
                         # 可能是验证码错误，继续重试而不是直接判断未注册
@@ -245,24 +255,21 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             input_email(page, email_addr)
             page.wait_for_timeout(random.randint(400, 600))
             click_login_continue_strict(page)
-            url = _check_url_change(page, url_before, "输入邮箱并点击继续", 2500)
 
-            # 检查是否有验证码
-            captcha_type, _ = detect_captcha_type(page)
-            if captcha_type == "unknown":
-                # 没有验证码，检查URL是否变化
-                if url == url_before or ("/login" in url and "/login/" not in url):
-                    # URL没变化或仍在登录页，可能是未注册
-                    print("[状态] 输入邮箱后无验证码且URL未变化，检查是否未注册...")
-                    if need_register(page):
-                        print("[状态] 检测到账号未注册")
-                        return "need_register"
-                    # 等待一下再检查
-                    page.wait_for_timeout(1000)
-                    url_after_wait = page.url
-                    if url_after_wait == url:
-                        print("[状态] 等待后URL仍未变化，判定为未注册")
-                        return "need_register"
+            # 点击后等待1-3秒
+            wait_time = random.uniform(1000, 3000)
+            print(f"[等待] 点击继续后等待 {wait_time/1000:.1f}秒...")
+            page.wait_for_timeout(int(wait_time))
+
+            # 检查并点击"已知晓"按钮
+            _dismiss_error_popup(page)
+
+            url = _check_url_change(page, url_before, "输入邮箱并点击继续", 500)
+
+            # 检查页面是否提示未注册
+            if need_register(page):
+                print("[状态] 页面提示账号未注册，跳转到注册流程")
+                return "need_register"
 
             if "/login/password" not in url and "/login/mfa" not in url and "/my/" not in url:
                 # 先再做一次验证码处理
@@ -277,6 +284,9 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 )
                 if post_captcha_result == "rate_limited":
                     return "rate_limited"
+                if post_captcha_result is False:
+                    print("[ERROR] 验证码处理失败")
+                    return False
                 url = _check_url_change(page, url, "验证码处理", 500)
                 if "/login/password" not in url and "/login/mfa" not in url and "/my/" not in url:
                     # 检查是否有明确的未注册提示
@@ -313,6 +323,9 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
         if captcha_result == "rate_limited":
             print("[ERROR] IP 被风控，请更换代理或等待后重试")
             return "rate_limited"
+        if captcha_result is False:
+            print("[ERROR] 验证码处理失败")
+            return False
 
         # 验证码处理后检查URL
         url = _check_url_change(page, url_before, "兜底验证码处理", 500)
@@ -361,6 +374,9 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
                 if captcha_result == "rate_limited":
                     return "rate_limited"
+                if captcha_result is False:
+                    print("[ERROR] 验证码处理失败")
+                    return False
                 url = _check_url_change(page, url, "验证码处理", 500)
                 if "/register/register-set-password" not in url and "/register-set-password" not in url:
                     break
@@ -409,6 +425,9 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
                 if captcha_result == "rate_limited":
                     return "rate_limited"
+                if captcha_result is False:
+                    print("[ERROR] 验证码处理失败")
+                    return False
                 url = _check_url_change(page, url, "验证码处理", 500)
                 if "/register" not in url or "/register/" in url:
                     break
@@ -424,6 +443,9 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
         captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
         if captcha_result == "rate_limited":
             return "rate_limited"
+        if captcha_result is False:
+            print("[ERROR] 验证码处理失败")
+            return False
 
         # 验证码处理后检查URL
         url = _check_url_change(page, url_before, "兜底验证码处理", 500)
