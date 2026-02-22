@@ -226,6 +226,25 @@ def handle_email_verification(
         print("未能获取邮件验证码")
         return False
 
+    # 重新查找输入框（等待邮件期间页面可能刷新）
+    code_input = None
+    for retry in range(3):
+        for selector in code_input_selectors:
+            try:
+                el = page.query_selector(selector)
+                if el and el.is_visible():
+                    code_input = el
+                    break
+            except Exception:
+                pass
+        if code_input:
+            break
+        page.wait_for_timeout(500)
+
+    if not code_input:
+        print("填充验证码时未找到输入框")
+        return False
+
     print(f"输入验证码: {email_code}")
     code_input.fill(email_code)
     page.wait_for_timeout(900)
