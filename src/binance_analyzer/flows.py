@@ -1,4 +1,7 @@
 import random
+import logging
+import os
+from datetime import datetime
 
 from .captcha_solver import solve_captcha, solve_captcha_if_present, detect_captcha_type
 from .email_imap import get_initial_mail_count, handle_email_verification
@@ -10,6 +13,44 @@ from .web_actions import (
     input_password,
     need_register,
 )
+
+
+# 配置日志
+def setup_logger(email_addr):
+    """为每个账号设置独立的日志文件"""
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # 使用邮箱和时间戳作为日志文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_email = email_addr.replace("@", "_at_").replace(".", "_")
+    log_file = os.path.join(log_dir, f"{safe_email}_{timestamp}.log")
+
+    # 创建logger
+    logger = logging.getLogger(f"flows_{email_addr}")
+    logger.setLevel(logging.DEBUG)
+
+    # 清除已有的handlers
+    logger.handlers.clear()
+
+    # 文件handler
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+
+    # 控制台handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
+    # 格式
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    logger.info(f"日志文件: {log_file}")
+    return logger, log_file
 
 
 RISK_SIGNATURES = [
@@ -24,15 +65,21 @@ RISK_SIGNATURES = [
 
 
 def _has_risk_error(page):
+    """检查页面是否有风控错误"""
     try:
         body = page.query_selector("body")
         text = body.inner_text() if body else ""
-        return any(sig.lower() in text.lower() for sig in RISK_SIGNATURES), text
-    except Exception:
+        has_risk = any(sig.lower() in text.lower() for sig in RISK_SIGNATURES)
+        if has_risk:
+            print(f"[DEBUG] 检测到风控错误")
+        return has_risk, text
+    except Exception as e:
+        print(f"[DEBUG] _has_risk_error 异常: {e}")
         return False, ""
 
 
-def _dismiss_error_popup(page):
+def _dismiss_error_popup(page, logger=None):
+    """检查并点击"已知晓"等弹窗按钮"""
     dismiss_btns = [
         "button:has-text('已知晓')",
         "button:has-text('Got it')",
@@ -46,15 +93,22 @@ def _dismiss_error_popup(page):
             btn = page.query_selector(selector)
             if btn and btn.is_visible():
                 btn.click()
-                print(f"点击了关闭按钮: {selector}")
+                msg = f"点击了关闭按钮: {selector}"
+                print(f"[DEBUG] {msg}")
+                if logger:
+                    logger.debug(msg)
                 page.wait_for_timeout(random.randint(800, 1200))
                 return True
-        except Exception:
+        except Exception as e:
+            msg = f"点击按钮 {selector} 失败: {e}"
+            print(f"[DEBUG] {msg}")
+            if logger:
+                logger.debug(msg)
             pass
     return False
 
 
-def _check_url_change(page, url_before, action_name, wait_ms=1000):
+def _check_url_change(page, url_before, action_name, wait_ms=1000, logger=None):
     """
     检查URL是否变化，用于检测页面跳转
 
@@ -63,18 +117,40 @@ def _check_url_change(page, url_before, action_name, wait_ms=1000):
         url_before: 操作前的URL
         action_name: 操作名称（用于日志）
         wait_ms: 等待时间（毫秒）
+        logger: 日志对象
 
     Returns:
         新的URL
     """
-    page.wait_for_timeout(wait_ms)
-    url_after = page.url
-    if url_after != url_before:
-        print(f"[URL变化] {action_name} 后: {url_before} -> {url_after}")
-    return url_after
+    try:
+        page.wait_for_timeout(wait_ms)
+        url_after = page.url
+        if url_after != url_before:
+            msg = f"URL变化 {action_name} 后: {url_before} -> {url_after}"
+            print(f"[URL变化] {msg}")
+            if logger:
+                logger.info(msg)
+        else:
+            msg = f"{action_name} 后URL未变化: {url_before}"
+            print(f"[DEBUG] {msg}")
+            if logger:
+                logger.debug(msg)
+        return url_after
+    except Exception as e:
+        msg = f"_check_url_change 异常: {e}"
+        print(f"[DEBUG] {msg}")
+        if logger:
+            logger.error(msg)
+        return url_before
 
 
 def login_with_url_state(page, email_addr, email_password, config, page_timeout=60000):
+    # 设置日志
+    logger, log_file = setup_logger(email_addr)
+    logger.info("="*60)
+    logger.info(f"开始登录流程: {email_addr}")
+    logger.info("="*60)
+
     api_key = config["openrouter_api_key"]
     model = config.get("models", [])
     imap_host = config["imap_host"]
@@ -83,8 +159,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
     captcha_config = config.get("captcha", {})
     mfa_config = config.get("mfa", {})
 
-    print("\n[URL状态机] 打开登录页面...")
+    logger.info(f"登录URL: {login_start_url}")
+    logger.info("打开登录页面...")
+    print(f"\n[日志文件] {log_file}")
+
     if not goto_with_retry(page, login_start_url, page_timeout=page_timeout):
+        logger.error("登录页面加载失败")
         print("登录页面加载失败")
         return False
 
@@ -94,20 +174,26 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
 
     max_iterations = 20
     for iteration in range(max_iterations):
-        page.wait_for_timeout(random.randint(1800, 2500))
-        url = page.url
-        print(f"\n[迭代 {iteration + 1}] 当前 URL: {url}")
+        try:
+            page.wait_for_timeout(random.randint(1800, 2500))
+            url = page.url
+            print(f"\n[迭代 {iteration + 1}] 当前 URL: {url}")
 
-        has_risk, body_text = _has_risk_error(page)
-        if has_risk:
-            print("检测到错误页面!")
-            print(f"页面内容: {body_text[:500]}")
-            _dismiss_error_popup(page)
-            if ("网络连接失败" in body_text or "208075" in body_text) and iteration < 5:
-                print("尝试刷新页面...")
-                page.reload()
-                page.wait_for_timeout(random.randint(2500, 3500))
-                continue
+            has_risk, body_text = _has_risk_error(page)
+            if has_risk:
+                print("[DEBUG] 检测到错误页面!")
+                print(f"[DEBUG] 页面内容: {body_text[:500]}")
+                _dismiss_error_popup(page)
+                if ("网络连接失败" in body_text or "208075" in body_text) and iteration < 5:
+                    print("[DEBUG] 尝试刷新页面...")
+                    page.reload()
+                    page.wait_for_timeout(random.randint(2500, 3500))
+                    continue
+        except Exception as e:
+            print(f"[DEBUG] 迭代 {iteration + 1} 异常: {e}")
+            import traceback
+            print(f"[DEBUG] 堆栈: {traceback.format_exc()}")
+            continue
 
         if "/login/stay-signed-in" in url:
             print("[状态] stay-signed-in - 点击'是'按钮")
@@ -119,17 +205,24 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
         if "/login/mfa" in url:
             print("[状态] mfa - 处理邮件验证码")
             url_before = url
-            ok = handle_email_verification(
-                page,
-                imap_host,
-                imap_port,
-                email_addr,
-                email_password,
-                initial_mail_count,
-                mfa_submit_retry=mfa_config.get("submit_retry", 2),
-                consumed_codes=consumed_codes,
-            )
-            if not ok:
+            try:
+                ok = handle_email_verification(
+                    page,
+                    imap_host,
+                    imap_port,
+                    email_addr,
+                    email_password,
+                    initial_mail_count,
+                    mfa_submit_retry=mfa_config.get("submit_retry", 2),
+                    consumed_codes=consumed_codes,
+                )
+                if not ok:
+                    print("[DEBUG] 邮件验证失败")
+                    return False
+            except Exception as e:
+                print(f"[DEBUG] handle_email_verification 异常: {e}")
+                import traceback
+                print(f"[DEBUG] 堆栈: {traceback.format_exc()}")
                 return False
 
             page.wait_for_timeout(random.randint(2200, 3200))
@@ -163,11 +256,23 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             # 检查并点击"已知晓"按钮
             _dismiss_error_popup(page)
 
-            initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
-            input_password(page, email_password)
-            page.wait_for_timeout(random.randint(400, 600))
-            click_button(page, ["继续", "Continue", "下一步", "Next"])
-            url = _check_url_change(page, url_before, "输入密码并点击继续", 1800)
+            try:
+                initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
+                print(f"[DEBUG] 获取初始邮件数: {initial_mail_count}")
+            except Exception as e:
+                print(f"[DEBUG] 获取初始邮件数失败: {e}")
+                initial_mail_count = 0
+
+            try:
+                input_password(page, email_password)
+                page.wait_for_timeout(random.randint(400, 600))
+                click_button(page, ["继续", "Continue", "下一步", "Next"])
+                url = _check_url_change(page, url_before, "输入密码并点击继续", 1800)
+            except Exception as e:
+                print(f"[DEBUG] 输入密码或点击继续失败: {e}")
+                import traceback
+                print(f"[DEBUG] 堆栈: {traceback.format_exc()}")
+                continue
 
             captcha_result = solve_captcha_if_present(
                 page,
@@ -225,7 +330,9 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             if email_input:
                 try:
                     current_value = email_input.input_value()
-                except Exception:
+                    print(f"[DEBUG] 邮箱输入框当前值: {current_value}")
+                except Exception as e:
+                    print(f"[DEBUG] 获取邮箱输入框值失败: {e}")
                     current_value = ""
                 if current_value and email_addr in current_value:
                     print("[状态] 邮箱已输入，点击继续...")
