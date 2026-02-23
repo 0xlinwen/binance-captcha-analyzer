@@ -272,6 +272,11 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     consumed_codes=consumed_codes,
                 )
                 if not ok:
+                    url_now = page.url
+                    if "/my/" in url_now or "authcenter" in url_now or "/login/stay-signed-in" in url_now:
+                        print("[状态] 邮件验证返回失败但页面已跳转，判定成功")
+                        logger.info("邮件验证返回失败但页面已跳转，判定成功")
+                        continue
                     print("[WARNING] 邮件验证失败，刷新页面重试...")
                     logger.warning("邮件验证失败，刷新页面重试")
                     page.reload()
@@ -283,6 +288,11 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 import traceback
                 print(f"[DEBUG] 堆栈: {traceback.format_exc()}")
                 logger.debug(f"堆栈: {traceback.format_exc()}")
+                url_now = page.url
+                if "/my/" in url_now or "authcenter" in url_now or "/login/stay-signed-in" in url_now:
+                    print("[状态] 异常但页面已跳转，判定成功")
+                    logger.info("异常但页面已跳转，判定成功")
+                    continue
                 page.reload()
                 page.wait_for_timeout(2000)
                 continue
