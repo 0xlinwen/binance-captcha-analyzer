@@ -210,7 +210,13 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             print(f"\n[迭代 {iteration + 1}] 当前 URL: {url}")
             logger.info(msg)
 
-            # 检测白屏
+            # 登录成功判断（优先于白屏检测，避免 dashboard 加载中被误判）
+            if "/my/" in url or ("binance.com" in url and "login" not in url and "register" not in url):
+                print("[状态] 登录成功!")
+                logger.info("登录成功!")
+                return True
+
+            # 检测白屏（仅在登录/注册页面检测）
             if _is_page_blank(page, logger):
                 print("[WARNING] 检测到白屏，刷新页面...")
                 logger.warning("检测到白屏，刷新页面")
@@ -502,11 +508,6 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 logger.info("检测到账号未注册")
                 return "need_register"
             continue
-
-        if "/my/" in url or ("binance.com" in url and "login" not in url and "register" not in url):
-            print("[状态] 登录成功!")
-            logger.info("登录成功!")
-            return True
 
         if need_register(page):
             print("[状态] 检测到账号未注册")
