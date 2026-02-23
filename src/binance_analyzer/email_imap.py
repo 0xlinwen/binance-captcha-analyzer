@@ -280,28 +280,6 @@ def handle_email_verification(
         page.wait_for_timeout(1500)
 
     if not code_input:
-        # 打印页面上所有 input 元素帮助调试
-        print("[DEBUG] 未找到验证码输入框，列出页面所有 input 元素:")
-        try:
-            inputs = page.query_selector_all("input")
-            for i, inp in enumerate(inputs[:10]):
-                try:
-                    attrs = inp.evaluate("""el => {
-                        return {
-                            type: el.type,
-                            name: el.name,
-                            id: el.id,
-                            placeholder: el.placeholder,
-                            maxlength: el.maxLength,
-                            class: el.className,
-                            visible: el.offsetParent !== null
-                        }
-                    }""")
-                    print(f"  input[{i}]: {attrs}")
-                except:
-                    pass
-        except:
-            pass
         return False
 
     email_code = get_email_verification_code(

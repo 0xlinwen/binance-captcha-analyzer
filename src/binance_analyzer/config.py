@@ -20,6 +20,9 @@ def load_config(base_dir: Path) -> dict:
     config["captcha"].setdefault("cooldown_on_risk_max_sec", 60)
     config["captcha"].setdefault("click_retry_per_cell", 3)
 
+    config.setdefault("cache", {})
+    config["cache"].setdefault("enabled", True)
+
     config.setdefault("runtime", {})
     config["runtime"].setdefault("max_workers_default", 2)
     config["runtime"].setdefault("start_delay_min_sec", 8)

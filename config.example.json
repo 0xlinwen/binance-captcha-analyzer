@@ -1,31 +1,25 @@
 {
-  "openrouter_api_key": "your_openrouter_api_key_here",
+  "openrouter_api_key": "key",
   "models": [
-    "google/gemini-3-flash-preview"
+    "google/gemini-3-flash-preview"    
   ],
-  "imap_host": "imap.example.com",
+  "imap_host": "imap.firstmail.ltd",
   "imap_port": 993,
   "accounts_file": "accounts.txt",
   "output_file": "output/registered_accounts.json",
-  "max_workers": 2,
   "headless": false,
-  "proxy": {
-    "enabled": false,
-    "server": "",
-    "username": "",
-    "password": ""
-  },
+  "max_workers": 1,
   "login": {
     "start_url": "https://accounts.binance.com/zh-CN/login"
   },
+  "browser": {
+    "use_system_chrome": false,
+    "minimal_stealth": true
+  },
   "captcha": {
     "retry_mode": "fast",
-    "max_attempts_per_round": 3,
-    "max_rounds": 2,
-    "cooldown_on_risk_min_sec": 20,
-    "cooldown_on_risk_max_sec": 60,
-    "click_retry_per_cell": 3,
-    "auto_tune_slider_offset": true
+    "max_attempts_per_round": 1,
+    "max_rounds": 1
   },
   "mfa": {
     "submit_retry": 2,
@@ -36,5 +30,14 @@
       "not registered",
       "没有账号"
     ]
+  },
+  "cache": {
+    "enabled": true
+  },
+  "proxy": {
+    "enabled": false,
+    "server": "as.rrp.b2proxy.com:10000",
+    "username": "USER717854-zone-custom-region-JP",
+    "password": "a92a13"
   }
 }

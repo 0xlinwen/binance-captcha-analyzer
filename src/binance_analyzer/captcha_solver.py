@@ -31,7 +31,7 @@ def _call_ai_with_retry(api_func, *args, max_retries=AI_RETRY_COUNT, **kwargs):
     raise last_error
 
 
-def _captcha_gone_stably(page, checks=3, interval_ms=250):
+def _captcha_gone_stably(page, checks=5, interval_ms=500):
     """Confirm captcha is absent across multiple checks to avoid transient false positives."""
     for idx in range(max(1, checks)):
         captcha_type, _ = detect_captcha_type(page)
@@ -586,6 +586,9 @@ def solve_captcha(
                             print("[AI] 滑动执行失败")
                             break
 
+                        # 等待服务器验证响应
+                        page.wait_for_timeout(2000)
+
                         # 使用统一检测逻辑，避免选择器覆盖不全导致误判
                         if _captcha_gone_stably(page):
                             print("[AI] 滑块验证码通过!")
@@ -620,6 +623,9 @@ def solve_captcha(
                             if not drag_success:
                                 print("[保底] 滑动执行失败")
                                 continue
+
+                            # 等待服务器验证响应
+                            page.wait_for_timeout(2000)
 
                             if _captcha_gone_stably(page):
                                 print("[保底] 滑块验证码通过!")
