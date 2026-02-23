@@ -15,13 +15,25 @@ executor_ref = None
 def process_account(args):
     base_dir, account, config, index = args
     email_addr, password = account
+    short_email = email_addr.split("@")[0]
+    max_retries = config.get("max_login_retries", 3)
 
-    # 不再等待，直接启动
-    try:
-        return email_addr, register_account(base_dir, email_addr, password, config)
-    except Exception as e:
-        print(f"处理 {email_addr} 出错: {e}")
-        return email_addr, False
+    for attempt in range(max_retries):
+        try:
+            result = register_account(base_dir, email_addr, password, config)
+            if result:
+                return email_addr, True
+            # 登录失败，重试
+            if attempt < max_retries - 1:
+                print(f"[{short_email}] ⟳ 重试 {attempt + 2}/{max_retries}")
+                time.sleep(2)
+        except Exception as e:
+            print(f"[{short_email}] ✗ 异常: {e}")
+            if attempt < max_retries - 1:
+                print(f"[{short_email}] ⟳ 重试 {attempt + 2}/{max_retries}")
+                time.sleep(2)
+
+    return email_addr, False
 
 
 def signal_handler(signum, frame):
@@ -72,8 +84,7 @@ def main():
     max_workers = config.get("max_workers", runtime_cfg.get("max_workers_default", 2))
     headless = config.get("headless", False)
 
-    print(f"共加载 {len(accounts)} 个账号")
-    print(f"进程数: {max_workers}, 无头模式: {headless}")
+    print(f"账号: {len(accounts)} | 进程: {max_workers} | 无头: {headless}")
 
     screenshots_dir = base_dir / "screenshots"
     success_count = 0
@@ -92,7 +103,7 @@ def main():
                         success_count += 1
                     else:
                         fail_count += 1
-                    print(f"进度: {success_count + fail_count}/{len(accounts)} (成功: {success_count}, 失败: {fail_count})")
+                    print(f"进度: {success_count + fail_count}/{len(accounts)} | 成功: {success_count} | 失败: {fail_count}")
                 except Exception as e:
                     fail_count += 1
                     print(f"任务异常: {e}")
@@ -103,7 +114,6 @@ def main():
 
     cleanup_screenshots(screenshots_dir)
 
-    print(f"\n\n{'='*60}")
-    print("批量注册完成!")
-    print(f"成功: {success_count}, 失败: {fail_count}")
-    print(f"{'='*60}")
+    print(f"\n{'='*50}")
+    print(f"完成 | 成功: {success_count} | 失败: {fail_count}")
+    print(f"{'='*50}")
