@@ -152,6 +152,66 @@ def handle_email_verification(
     # 等待页面加载完成
     page.wait_for_timeout(2000)
 
+    def _dismiss_auth_error_popup():
+        """检测并关闭认证失败弹窗"""
+        try:
+            # 检测页面是否有"认证失败"文字
+            body_text = page.inner_text("body")
+            if "认证失败" in body_text:
+                # 尝试点击弹窗按钮（知道了 优先）
+                popup_buttons = [
+                    "button:has-text('知道了')",
+                    "button:has-text('确定')",
+                    "button:has-text('OK')",
+                    "button:has-text('关闭')",
+                ]
+                for selector in popup_buttons:
+                    try:
+                        btn = page.query_selector(selector)
+                        if btn and btn.is_visible():
+                            btn.click()
+                            print("关闭了认证失败弹窗")
+                            page.wait_for_timeout(1000)
+                            return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return False
+
+    def _click_get_code_button():
+        """检测并点击获取验证码按钮"""
+        try:
+            # 检查是否已有"验证码已发送"提示
+            body_text = page.inner_text("body")
+            if "验证码已发送" in body_text or "已发送" in body_text:
+                return False  # 已发送，不需要点击
+
+            # 尝试点击获取验证码按钮
+            get_code_buttons = [
+                "button:has-text('获取验证码')",
+                "button:has-text('发送验证码')",
+                "button:has-text('获取')",
+                "button:has-text('发送')",
+                "a:has-text('获取验证码')",
+                "span:has-text('获取验证码')",
+                "[class*='send'] button",
+                "[class*='get-code']",
+            ]
+            for selector in get_code_buttons:
+                try:
+                    btn = page.query_selector(selector)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        print("点击了获取验证码按钮")
+                        page.wait_for_timeout(2000)
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
     code_input_selectors = [
         "input[maxlength='6']",
         "input[autocomplete='one-time-code']",
@@ -205,6 +265,13 @@ def handle_email_verification(
     code_frame = None
     # 尝试多次查找，等待元素出现
     for retry in range(10):
+        # 检测并关闭认证失败弹窗
+        _dismiss_auth_error_popup()
+
+        # 检测是否需要点击获取验证码按钮
+        if retry == 0:
+            _click_get_code_button()
+
         code_input, code_frame = _find_code_input()
         if code_input:
             print(f"找到验证码输入框")
@@ -269,9 +336,17 @@ def handle_email_verification(
     if not _submit_mfa(page):
         for _ in range(max(1, mfa_submit_retry)):
             page.wait_for_timeout(500)
+            # 检测认证失败弹窗
+            _dismiss_auth_error_popup()
             if _submit_mfa(page):
                 return True
         return False
+
+    # 提交后检测认证失败弹窗
+    page.wait_for_timeout(1000)
+    if _dismiss_auth_error_popup():
+        return False  # 认证失败，返回 False 让上层重试
+
     return True
 
 
