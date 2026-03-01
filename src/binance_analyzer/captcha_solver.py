@@ -1,6 +1,5 @@
 import random
 import time
-from pathlib import Path
 
 from .captcha_ai import (
     analyze_click_captcha,
@@ -10,8 +9,7 @@ from .captcha_ai import (
 )
 
 FAST_DRAG_STEPS = 2
-MAX_COOLDOWN_SECONDS = 5
-DEBUG_DIR = Path(__file__).resolve().parents[2] / "debug"
+MAX_COOLDOWN_SECONDS = 120  # 增加到2分钟
 AI_RETRY_COUNT = 3  # AI 调用重试次数
 AI_RETRY_DELAY = 1  # AI 重试间隔（秒）
 
@@ -68,11 +66,28 @@ def simulate_human_drag(page, slider_element, distance):
 
         # 分步滑动
         steps = random.randint(20, 30)
+
+        # 随机选择缓动函数
+        easing_type = random.choice(['ease_out', 'ease_in_out', 'linear_with_pause'])
+        pause_at = random.uniform(0.3, 0.4) if easing_type == 'linear_with_pause' else None
+
         for i in range(steps):
             progress = (i + 1) / steps
-            eased = progress * (2 - progress)  # 缓动函数
+
+            # 应用不同的缓动函数
+            if easing_type == 'ease_out':
+                eased = progress * (2 - progress)  # 二次缓动
+            elif easing_type == 'ease_in_out':
+                eased = progress * progress * (3 - 2 * progress)  # 三次缓动
+            else:  # linear_with_pause
+                # 模拟人类中途停顿
+                if pause_at and abs(progress - pause_at) < 0.05:
+                    eased = pause_at  # 在指定位置停顿
+                else:
+                    eased = progress
+
             target_x = start_x + distance * eased
-            jitter_y = random.uniform(-0.5, 0.5)
+            jitter_y = random.uniform(-2.0, 2.0)  # 增加到±2px
             page.mouse.move(target_x, start_y + jitter_y)
             time.sleep(random.uniform(0.01, 0.03))
 
@@ -257,6 +272,15 @@ def click_captcha_images(page, positions, click_retry_per_cell=3):
                     time.sleep(0.2)
                     continue
 
+                # 先移动鼠标到目标附近（模拟真人行为）
+                box = valid_element.bounding_box()
+                if box:
+                    target_x = box["x"] + box["width"] / 2 + random.uniform(-5, 5)  # 中心点±5px偏移
+                    target_y = box["y"] + box["height"] / 2 + random.uniform(-5, 5)
+                    page.mouse.move(target_x, target_y)
+                    time.sleep(random.uniform(0.1, 0.3))  # 移动后停顿
+
+                # 然后点击
                 valid_element.click(timeout=3000)
 
                 clicked.append((row, col))
@@ -284,22 +308,27 @@ def solve_captcha(
     max_rounds=1,
     reload_url=None,
     page_timeout=60000,
-    cooldown_min_sec=20,
-    cooldown_max_sec=60,
+    cooldown_min_sec=30,
+    cooldown_max_sec=90,
     click_retry_per_cell=3,
 ):
+    # 添加观察延迟（模拟人类看验证码的时间）
+    observation_delay = random.uniform(0.8, 2.0)
+    print(f"[验证码] 观察验证码 {observation_delay:.1f}秒...")
+    time.sleep(observation_delay)
+
     model_candidates = model if isinstance(model, (list, tuple)) else [model]
     model_candidates = [m for m in model_candidates if m]
     if not model_candidates:
         raise ValueError("models 配置为空，无法识别验证码")
     primary_model = model_candidates[0]
-    fast_mode = retry_mode == "fast"
     rate_limit_signatures = [
         "too_many_attempts",
         "尝试次数过多",
         "cap_too_many",
         "cap_too_many_attempts",
         "208075",
+        "208061",
         "认证失败，请刷新页面后重试",
         "$e.execute is not a function",
     ]
@@ -309,7 +338,7 @@ def solve_captcha(
             try:
                 print(f"进入第 {round_idx + 1}/{max_rounds} 轮，重开登录页: {reload_url}")
                 page.goto(reload_url, wait_until="domcontentloaded", timeout=page_timeout)
-                page.wait_for_timeout(1000)  # 固定等待1秒
+                page.wait_for_timeout(random.randint(2200, 3000))  # 恢复随机等待
             except Exception as e:
                 print(f"重开登录页失败: {e}")
                 continue
@@ -317,7 +346,7 @@ def solve_captcha(
         for attempt in range(max_attempts):
             print(f"\n--- 验证码轮次 {round_idx + 1}/{max_rounds}，尝试 {attempt + 1}/{max_attempts} ---")
             if attempt > 0:
-                time.sleep(0.2)  # 固定短暂等待
+                time.sleep(random.uniform(0.5, 1.0))  # 恢复随机等待
             dismiss_global_modal(page)
 
             page_text = page.inner_text("body") if page.query_selector("body") else ""
@@ -357,7 +386,7 @@ def solve_captcha(
                         print("[WARNING] 点击验证码本轮未成功点击任何格子，进入下一次尝试")
                         continue
 
-                    page.wait_for_timeout(500)  # 固定等待
+                    page.wait_for_timeout(random.randint(800, 1200))  # 恢复随机等待
 
                     verify_clicked = False
                     verify_selectors = [
@@ -388,7 +417,7 @@ def solve_captcha(
                         except Exception:
                             pass
 
-                    page.wait_for_timeout(800)  # 固定等待
+                    page.wait_for_timeout(random.randint(1000, 1500))  # 恢复随机等待
                     # 验证码稳定消失才判定通过
                     if _captcha_gone_stably(page):
                         return True
@@ -420,11 +449,10 @@ def solve_captcha(
 
                 image_width = int(box["width"]) if box else 300
                 screenshot_base64 = screenshot_to_base64(screenshot_bytes)
-                debug_prefix = f"slider_{email_addr.split('@')[0] if email_addr else 'unknown'}_r{round_idx+1}_{attempt+1}"
 
                 try:
                     # 等待滑块完全加载
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(random.randint(500, 800))
 
                     slider_btn = None
                     slider_selectors = [
@@ -451,12 +479,11 @@ def solve_captcha(
                                     slider_btn = btn
                                     print(f"[滑块] 找到滑块按钮: {selector}, 位置: ({box['x']:.1f}, {box['y']:.1f}), 尺寸: {box['width']:.1f}x{box['height']:.1f}")
                                     break
-                            except:
+                            except Exception:
                                 continue
 
                     if not slider_btn:
                         print("[ERROR] 未找到滑块按钮")
-                        print("[DEBUG] 尝试列出所有可能的滑块元素...")
                         all_candidates = page.query_selector_all("[class*='slide'], [class*='slider'], [class*='drag'], [class*='thumb']")
                         for i, el in enumerate(all_candidates[:5]):
                             try:
@@ -466,21 +493,20 @@ def solve_captcha(
                                     box = el.bounding_box()
                                     if box:
                                         print(f"  候选[{i}]: <{tag}> class='{class_name[:50]}' size={box['width']:.0f}x{box['height']:.0f}")
-                            except:
+                            except Exception:
                                 pass
                         continue
 
                     # ========== AI 识别 ==========
                     MAX_FIT_ATTEMPTS = 3
                     last_ai_distance = None
-                    fit_success = False
 
                     for fit_attempt in range(MAX_FIT_ATTEMPTS):
                         print(f"\n[拟合] 第 {fit_attempt + 1}/{MAX_FIT_ATTEMPTS} 次尝试...")
 
                         # 每次拟合都重新截图
                         if fit_attempt > 0:
-                            page.wait_for_timeout(500)  # 固定等待
+                            page.wait_for_timeout(random.randint(500, 800))  # 恢复随机等待
                             slider_bg_new = page.query_selector(".bs-main-image, [class*='slider-bg'], [class*='captcha-bg'], .bcap-bg, [class*='verify-img']")
                             if slider_bg_new:
                                 screenshot_bytes = slider_bg_new.screenshot()
@@ -490,42 +516,6 @@ def solve_captcha(
                                 box = captcha_element.bounding_box()
                             image_width = int(box["width"]) if box else 300
                             screenshot_base64 = screenshot_to_base64(screenshot_bytes)
-
-                        # 保存原始背景图到 debug
-                        try:
-                            import cv2 as _cv2
-                            import numpy as _np
-
-                            DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-                            nparr = _np.frombuffer(screenshot_bytes, _np.uint8)
-                            bg_img = _cv2.imdecode(nparr, _cv2.IMREAD_UNCHANGED)
-                            if bg_img is not None:
-                                _cv2.imwrite(str(DEBUG_DIR / f"{debug_prefix}_fit{fit_attempt+1}_bg.png"), bg_img)
-
-                                # 打高精度刻度尺
-                                h, w = bg_img.shape[:2]
-                                ruler_h = 40
-                                ruler_img = _np.ones((h + ruler_h, w, 3), dtype=_np.uint8) * 255
-                                ruler_img[ruler_h:, :] = bg_img
-
-                                for x in range(0, w + 1):
-                                    if x % 50 == 0:
-                                        _cv2.line(ruler_img, (x, 0), (x, ruler_h), (0, 0, 255), 2)
-                                        _cv2.line(ruler_img, (x, ruler_h), (x, h + ruler_h), (0, 0, 255), 1)
-                                        label = str(x)
-                                        _cv2.putText(ruler_img, label, (x - len(label)*5, 15),
-                                                    _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-                                    elif x % 10 == 0:
-                                        _cv2.line(ruler_img, (x, ruler_h - 15), (x, ruler_h), (255, 0, 0), 1)
-                                        _cv2.putText(ruler_img, str(x), (x - 8, ruler_h - 2),
-                                                    _cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1)
-                                    elif x % 5 == 0:
-                                        _cv2.line(ruler_img, (x, ruler_h - 8), (x, ruler_h), (150, 150, 150), 1)
-
-                                _cv2.rectangle(ruler_img, (0, ruler_h), (60, h + ruler_h), (0, 255, 0), 3)
-                                _cv2.imwrite(str(DEBUG_DIR / f"{debug_prefix}_fit{fit_attempt+1}_ruler.png"), ruler_img)
-                        except Exception:
-                            pass
 
                         # AI 识别
                         print("[AI] 调用 AI 识别缺口位置...")
@@ -540,17 +530,6 @@ def solve_captcha(
                             if last_ai_distance <= 0 and ai_gap_x > 0:
                                 last_ai_distance = ai_gap_x
                             print(f"[AI] 识别结果: gap_x={ai_gap_x}, puzzle_x={ai_puzzle_x}, distance={last_ai_distance}")
-
-                            # 保存 AI 结果标注图
-                            try:
-                                if bg_img is not None:
-                                    ai_img = ruler_img.copy()
-                                    _cv2.line(ai_img, (ai_gap_x, 0), (ai_gap_x, h + ruler_h), (0, 255, 255), 2)
-                                    _cv2.putText(ai_img, f"AI:{ai_gap_x}", (ai_gap_x + 3, ruler_h + 20),
-                                                _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                                    _cv2.imwrite(str(DEBUG_DIR / f"{debug_prefix}_fit{fit_attempt+1}_ai_result.png"), ai_img)
-                            except Exception:
-                                pass
 
                         except Exception as e:
                             print(f"[AI] 识别失败: {e}")
@@ -587,7 +566,7 @@ def solve_captcha(
                             break
 
                         # 等待服务器验证响应
-                        page.wait_for_timeout(2000)
+                        page.wait_for_timeout(random.randint(1500, 2500))  # 恢复随机等待
 
                         # 使用统一检测逻辑，避免选择器覆盖不全导致误判
                         if _captcha_gone_stably(page):
@@ -625,7 +604,7 @@ def solve_captcha(
                                 continue
 
                             # 等待服务器验证响应
-                            page.wait_for_timeout(2000)
+                            page.wait_for_timeout(random.randint(1500, 2500))  # 恢复随机等待
 
                             if _captcha_gone_stably(page):
                                 print("[保底] 滑块验证码通过!")
@@ -634,7 +613,7 @@ def solve_captcha(
                 except Exception as e:
                     print(f"识别失败: {e}")
 
-            page.wait_for_timeout(500)  # 固定等待
+            page.wait_for_timeout(random.randint(1000, 1500))  # 恢复随机等待
 
     print("验证码尝试次数已用完")
     return False

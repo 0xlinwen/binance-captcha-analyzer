@@ -1,7 +1,7 @@
 {
   "openrouter_api_key": "key",
   "models": [
-    "google/gemini-3-flash-preview"    
+    "google/gemini-3-flash-preview"
   ],
   "imap_host": "imap.firstmail.ltd",
   "imap_port": 993,
@@ -9,17 +9,18 @@
   "output_file": "output/registered_accounts.json",
   "headless": false,
   "max_workers": 1,
+  "max_login_retries": 3,
+  "mode": "login",
+  "debug_mode": false,
   "login": {
     "start_url": "https://accounts.binance.com/zh-CN/login"
-  },
-  "browser": {
-    "use_system_chrome": false,
-    "minimal_stealth": true
   },
   "captcha": {
     "retry_mode": "fast",
     "max_attempts_per_round": 1,
-    "max_rounds": 1
+    "max_rounds": 3,
+    "cooldown_min_sec": 30,
+    "cooldown_max_sec": 90
   },
   "mfa": {
     "submit_retry": 2,

@@ -26,8 +26,8 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 │               orchestrator.py (编排器)                    │
 │     浏览器启动 / 缓存管理 / Cookie提取 / 流量监控          │
 │                                                         │
-│  cache=true:  launch_persistent_context + route拦截      │
-│  cache=false: launch 普通模式（无拦截，干净环境）           │
+│  登录模式:  简化浏览器配置                                │
+│  注册模式:  完整反检测配置 + WebGL 伪造                   │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -173,6 +173,169 @@ python captcha_analyzer.py
 python captcha_analyzer.py --refresh-cache
 ```
 
+---
+
+## 浏览器环境配置详解
+
+### 登录模式 vs 注册模式
+
+登录和注册使用不同的浏览器配置策略：
+
+| 特性 | 登录模式 | 注册模式 |
+|------|----------|----------|
+| 浏览器启动 | `chromium.launch()` 简化配置 | `chromium.launch()` 完整反检测 |
+| 用户数据目录 | 无（每次全新浏览器） | 无（每次全新浏览器） |
+| 反检测脚本 | 无 | 完整 WebGL 伪造 |
+| User-Agent | 默认 | 自定义 Chrome 120 |
+| 视口大小 | 默认 | 1920x1080 |
+| 时区/语言 | 默认 | Asia/Shanghai, zh-CN |
+
+### 登录模式浏览器配置
+
+```python
+browser = p.chromium.launch(
+    headless=headless,
+    args=[
+        '--disable-blink-features=AutomationControlled',  # 隐藏自动化标识
+        '--no-sandbox',                                    # 禁用沙箱（提高兼容性）
+    ],
+    proxy=proxy_settings,  # 可选代理
+)
+page = browser.new_page()
+```
+
+**特点：**
+- 简化配置，启动速度快
+- 每次启动都是全新浏览器，无历史数据
+- 无 Cookie、无缓存、无登录状态
+- 适合已注册账号的登录验证
+
+### 注册模式浏览器配置
+
+```python
+browser = p.chromium.launch(
+    headless=headless,
+    args=[
+        '--disable-blink-features=AutomationControlled',  # 隐藏自动化标识
+        '--no-sandbox',
+        '--disable-dev-shm-usage',                        # 避免共享内存问题
+        '--disable-infobars',                             # 禁用信息栏
+        '--window-size=1920,1080',
+        '--start-maximized',
+    ]
+)
+
+context = browser.new_context(
+    viewport={'width': 1920, 'height': 1080},
+    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    locale='zh-CN',
+    timezone_id='Asia/Shanghai',
+    proxy=proxy_settings,
+)
+page = context.new_page()
+```
+
+**反检测脚本注入：**
+
+```javascript
+// 1. 隐藏 webdriver 属性
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined
+});
+
+// 2. 伪造 Chrome 对象
+window.chrome = {
+    runtime: {},
+    loadTimes: function() {},
+    csi: function() {},
+    app: {}
+};
+
+// 3. 修复 Permissions API
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications' ?
+        Promise.resolve({ state: Notification.permission }) :
+        originalQuery(parameters)
+);
+
+// 4. 伪造 WebGL 信息（关键！）
+const getParameterProxyHandler = {
+    apply: function(target, thisArg, args) {
+        const param = args[0];
+        if (param === 37445) {  // UNMASKED_VENDOR_WEBGL
+            return 'Google Inc. (Apple)';
+        }
+        if (param === 37446) {  // UNMASKED_RENDERER_WEBGL
+            return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
+        }
+        return Reflect.apply(target, thisArg, args);
+    }
+};
+```
+
+**特点：**
+- 完整的反检测配置，降低被识别为自动化的风险
+- 伪造 WebGL 渲染器信息（Binance 会检测）
+- 固定 User-Agent 和视口大小
+- 适合新账号注册
+
+### 缓存预热模式（warmup_cache）
+
+首次运行时自动执行，用于预热静态资源缓存：
+
+```python
+context = p.chromium.launch_persistent_context(
+    user_data_dir=str(MASTER_CACHE_DIR),  # 持久化用户数据目录
+    headless=headless,
+    args=[
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disk-cache-size=104857600',  # 100MB 磁盘缓存
+    ],
+    ignore_https_errors=True,
+    proxy=proxy_settings,
+)
+```
+
+**预热流程：**
+1. 访问登录页 `https://accounts.binance.com/zh-CN/login`
+2. 等待页面加载，下载静态资源
+3. 访问注册页 `https://www.binance.com/zh-CN/register`
+4. 等待页面加载
+5. 清除 Cookie（保留缓存）
+6. 关闭浏览器
+
+**缓存存储位置：**
+```
+.browser_cache/
+  master/                    # 主缓存模板（预热生成）
+    Default/
+      Cache/Cache_Data/      # Chromium 磁盘缓存
+  local_cache/               # 应用层缓存（JS/CSS 文件）
+    index.json               # 缓存索引
+    <md5_hash>               # 缓存文件
+```
+
+### 浏览器指纹检测点
+
+Binance 会检测以下浏览器指纹：
+
+| 检测项 | 说明 | 应对措施 |
+|--------|------|----------|
+| `navigator.webdriver` | 自动化标识 | 设为 undefined |
+| `window.chrome` | Chrome 特有对象 | 伪造完整对象 |
+| WebGL Vendor/Renderer | 显卡信息 | 伪造为真实显卡 |
+| User-Agent | 浏览器标识 | 使用真实 Chrome UA |
+| 视口大小 | 窗口尺寸 | 固定 1920x1080 |
+| 时区/语言 | 地区信息 | 设为 Asia/Shanghai |
+| Permissions API | 权限查询 | 修复异常行为 |
+
+---
+
 ## 登录/注册流程
 
 ### 状态机驱动
@@ -190,19 +353,41 @@ python captcha_analyzer.py --refresh-cache
 | `/register/register-set-password` | 设置密码 | 输入密码 → 点击继续 |
 | `/register/verification` | 邮件验证 | IMAP 获取验证码 → 填充 → 提交 |
 
+### 状态机参数
+
+```python
+# flows.py 顶部常量
+MAX_TOTAL_ITERATIONS = 50   # URL 状态机最大总迭代次数
+MAX_URL_RETRIES = 10        # 单个 URL 状态最大重试次数
+MAX_CAPTCHA_FAILS = 3       # 验证码最大连续失败次数
+MAX_MFA_RETRIES = 3         # MFA 最大重试次数
+```
+
 每个阶段都会自动检测并处理：
 - 验证码弹窗（滑块/点击）
 - 风控错误页面
 - 白屏检测与刷新
 - 弹窗关闭（Cookie 弹窗、"已知晓"按钮等）
-- 未注册检测（自动切换到注册流程）
+- 未注册检测（返回 `"need_register"` 状态）
+
+### 返回值说明
+
+| 返回值 | 含义 | CLI 处理 |
+|--------|------|----------|
+| `True` | 成功 | 计入成功数 |
+| `False` | 失败 | 重试（最多 3 次） |
+| `"rate_limited"` | IP 被风控 | 不重试 |
+| `"need_register"` | 账号未注册 | 不重试，计入未注册数 |
+| `"already_registered"` | 账号已注册 | 不重试，计入已注册数 |
 
 ### 风控检测
 
 以下关键词触发风控处理：
 - `网络连接失败`、`操作失败`、`PRECHECK`
-- `cap_too_many_attempts`、`208075`
+- `cap_too_many_attempts`、`208075`、`208061`
 - `认证失败，请刷新页面后重试`
+
+---
 
 ## AI 验证码识别
 
@@ -217,24 +402,6 @@ python captcha_analyzer.py --refresh-cache
 4. AI 返回需要点击的位置坐标
 5. 按坐标点击对应图片
 6. 点击"验证"按钮确认
-
-**AI 提示词：**
-
-```
-这是一个验证码图片，是一个 3x3 的图片网格。
-提示文字是："{prompt_text}"
-
-请分析这个验证码，告诉我应该点击哪些图片。
-图片位置用行列表示，从左上角开始：
-- 第1行第1列 = (1,1), 第1行第2列 = (1,2), 第1行第3列 = (1,3)
-- 第2行第1列 = (2,1), 第2行第2列 = (2,2), 第2行第3列 = (2,3)
-- 第3行第1列 = (3,1), 第3行第2列 = (3,2), 第3行第3列 = (3,3)
-
-请只返回 JSON 格式，例如：
-{"positions": [[1,2], [2,3], [3,1]]}
-
-不要返回其他内容，只返回 JSON。
-```
 
 **AI 返回格式：**
 ```json
@@ -251,35 +418,12 @@ python captcha_analyzer.py --refresh-cache
 5. 模拟人类滑动（缓动函数 + Y轴抖动 + 随机步数）
 6. 等待服务器验证
 
-**AI 提示词：**
-
-```
-分析这个滑块验证码图片。
-
-图片信息：
-- 总宽度：{image_width}px
-- 左侧 0-60px：拼图块（puzzle piece），宽度固定 60px
-- 背景中有一个缺口（gap），形状与拼图块相同
-
-任务：找到缺口左边缘的 x 坐标（像素值）
-
-提示：
-- 缺口通常比周围区域略暗或有明显边缘
-- 缺口宽度约 60px
-- 缺口位置通常在 100-250px 范围内
-
-返回 JSON 格式：
-{"gap_x": 缺口左边缘x坐标}
-```
-
 **AI 返回格式：**
 ```json
 {"gap_x": 185}
 ```
 
 ### 滑块拖动模拟
-
-`simulate_human_drag` 模拟真实人类滑动行为：
 
 ```python
 # 缓动函数：先快后慢
@@ -302,14 +446,8 @@ time.sleep(random.uniform(0.01, 0.03))
 - AI 调用失败自动重试 3 次，间隔 1 秒
 - 检测到风控签名时冷却 20-60 秒
 - 验证码消失需连续 5 次检测确认（间隔 500ms）
-- 点击验证码支持第二轮验证（等待新图片加载后继续）
 
-### 调试输出
-
-滑块验证码会在 `debug/` 目录生成调试图片：
-- `slider_xxx_bg.png` - 原始背景图
-- `slider_xxx_ruler.png` - 带刻度尺的背景图
-- `slider_xxx_ai_result.png` - AI 识别结果标注图
+---
 
 ## 本地缓存系统
 
@@ -321,10 +459,6 @@ time.sleep(random.uniform(0.01, 0.03))
 - `bin.bnbstatic.com/static` 的 JS/CSS
 - `public.bnbstatic.com/unpkg` 的 JS/CSS
 
-**缓存存储：** `.browser_cache/local_cache/`
-- `index.json` - 缓存索引（URL → 文件映射）
-- MD5 hash 文件 - 响应体
-
 ### Master/Worker 架构
 
 ```
@@ -335,11 +469,6 @@ time.sleep(random.uniform(0.01, 0.03))
   worker_1/        # Worker 1 的浏览器 profile
 ```
 
-- 首次运行自动预热：访问登录页和注册页，下载静态资源
-- 每个 Worker 启动时从 master 复制浏览器 profile
-- 运行结束后，新增的缓存文件同步回 master（排除验证码相关文件）
-- Worker 目录用完即删
-
 ### 缓存 vs 普通模式
 
 | 特性 | `cache.enabled: true` | `cache.enabled: false` |
@@ -347,9 +476,9 @@ time.sleep(random.uniform(0.01, 0.03))
 | 浏览器启动 | `launch_persistent_context` | `launch` (普通模式) |
 | 请求拦截 | `page.route("**/*")` | 无 |
 | 静态资源缓存 | `route.fulfill()` 本地返回 | 无 |
-| 浏览器 profile | `.browser_cache/worker_N/` | 临时目录（自动管理） |
 | 流量消耗 | 首次 ~35MB，后续 ~8MB | 每次 ~69MB |
-| 适用场景 | 批量处理，节省流量 | 调试，避免缓存干扰 |
+
+---
 
 ## 流量监控
 
@@ -362,17 +491,9 @@ time.sleep(random.uniform(0.01, 0.03))
 实际网络流量: 8.23MB
 本地缓存命中: 30.85MB
 请求数: 345 (网络: 129, 缓存: 216)
-
-按资源类型 (仅网络流量):
-  fetch              5.12MB (62.2%)
-  script             2.01MB (24.4%)
-  ...
-
-按域名 (仅网络流量, Top 10):
-  www.binance.com                            3.21MB (39.0%)
-  accounts.binance.com                       2.15MB (26.1%)
-  ...
 ```
+
+---
 
 ## 输出结果
 
@@ -392,7 +513,7 @@ time.sleep(random.uniform(0.01, 0.03))
 }
 ```
 
-CSRF Token 生成逻辑：`md5(cr00 cookie value)`
+---
 
 ## 日志系统
 
@@ -400,39 +521,33 @@ CSRF Token 生成逻辑：`md5(cr00 cookie value)`
 logs/
   2024-01-15.log                    # 每日全局摘要日志
   failures/
-    user1_at_example_com_20240115.log  # 失败账号详细日志（含完整操作记录）
+    user1_at_example_com_20240115.log  # 失败账号详细日志
 ```
 
-- 全局日志：记录每个账号的成功/失败、耗时、阶段
-- 失败日志：仅在失败时写入，包含完整的操作步骤和页面状态
+---
 
 ## 常见问题
 
-### `208075` / `认证失败，请刷新页面后重试`
+### `208075` / `PRECHECK` / `认证失败`
 
 IP 被风控，解决方案：
 - 降低并发数（`max_workers: 1-2`）
-- 账号之间加随机延迟
 - 使用高质量独立代理
 - 关闭缓存模式（`cache.enabled: false`）排除缓存干扰
 
 ### 验证码识别失败
 
 - 检查 `debug/` 目录的截图确认 AI 识别结果
-- 尝试更换 AI 模型（修改 `models` 配置）
+- 尝试更换 AI 模型
 - 增加 `max_attempts_per_round` 和 `max_rounds`
 
 ### 邮件验证码获取超时
 
-- 确认 IMAP 配置正确（host/port/密码）
+- 确认 IMAP 配置正确
 - 检查邮箱是否开启了 IMAP 访问
-- 超时时间默认 90 秒，Binance 邮件通常 10-30 秒内到达
+- 超时时间默认 90 秒
 
-### 页面白屏
-
-自动检测并刷新。如果频繁出现：
-- 检查网络/代理连接
-- 关闭缓存模式测试
+---
 
 ## 推荐配置
 

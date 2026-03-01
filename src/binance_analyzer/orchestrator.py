@@ -1,5 +1,4 @@
 import hashlib
-import os
 import random
 import shutil
 from pathlib import Path
@@ -8,7 +7,7 @@ from playwright.sync_api import sync_playwright
 
 from .flows import login_with_url_state, register_with_url_state
 from .storage import save_registered_account
-from .traffic_monitor import enable_traffic_monitor, print_traffic_summary, reset_traffic_monitor, mark_cached_url
+from .traffic_monitor import mark_cached_url
 from .local_cache import init_cache_manager, get_cache_manager
 
 PAGE_TIMEOUT = 60000
@@ -94,6 +93,10 @@ def warmup_cache(proxy_config=None, headless=True):
         launch_args = [
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-infobars',
+            '--window-size=1920,1080',
+            '--start-maximized',
             '--disk-cache-size=104857600',
         ]
 
@@ -113,11 +116,35 @@ def warmup_cache(proxy_config=None, headless=True):
             headless=headless,
             args=launch_args,
             proxy=proxy_settings,
-            viewport={"width": 1280, "height": 800},
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            locale='zh-CN',
+            timezone_id='Asia/Shanghai',
         )
 
         try:
             page = context.new_page()
+
+            # 隐藏自动化特征
+            page.add_init_script('''
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
+                };
+
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+            ''')
 
             # 启用资源拦截
             page.route("**/*", _handle_route)
@@ -247,29 +274,18 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
     headless = config.get("headless", False)
     proxy_config = config.get("proxy", {})
     proxy_enabled = proxy_config.get("enabled", False)
-    cache_enabled = config.get("cache", {}).get("enabled", True)
+    mode = config.get("mode", "login")  # register / login (不再支持 auto)
 
     print(f"\n{'='*60}")
     print(f"[Worker-{worker_id}] 开始处理: {email_addr}")
     if proxy_enabled:
         print(f"[Worker-{worker_id}] 代理: {proxy_config.get('server', 'N/A')}")
-    if not cache_enabled:
-        print(f"[Worker-{worker_id}] 本地缓存: 已禁用")
+    print(f"[Worker-{worker_id}] 模式: {mode}")
     print(f"{'='*60}")
 
-    # 初始化本地缓存管理器
-    if cache_enabled:
-        init_cache_manager(CACHE_DIR)
-
-    # 初始化 worker 缓存（从 master 复制）
-    if cache_enabled:
-        cache_dir = _init_worker_cache(worker_id)
-
     with sync_playwright() as p:
-        launch_args = [
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-        ]
+        # 根据模式选择不同的浏览器配置
+        is_register_mode = mode == "register"
 
         proxy_settings = None
         if proxy_enabled and proxy_config.get("server"):
@@ -283,62 +299,138 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                 proxy_settings["password"] = proxy_config["password"]
             print(f"[Worker-{worker_id}] 使用代理: {server}")
 
-        if cache_enabled:
-            launch_args.append('--disk-cache-size=104857600')
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(cache_dir),
-                headless=headless,
-                args=launch_args,
-                proxy=proxy_settings,
-                viewport={"width": 1280, "height": 800},
-            )
-            browser = None
-        else:
+        if is_register_mode:
+            # 注册模式：使用完整的反检测配置（browser_multi.py）
             browser = p.chromium.launch(
                 headless=headless,
-                args=launch_args,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-infobars',
+                    '--window-size=1920,1080',
+                    '--start-maximized',
+                ]
+            )
+            context = browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                locale='zh-CN',
+                timezone_id='Asia/Shanghai',
                 proxy=proxy_settings,
             )
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
-
-        try:
-            context.clear_cookies()
             page = context.new_page()
 
-            if cache_enabled:
-                # 启用资源拦截（屏蔽 + 本地缓存）
-                page.route("**/*", _handle_route)
-                # 启用响应缓存
-                page.on("response", _on_response)
+            # 完整的反检测脚本（包含 WebGL 伪造）
+            page.add_init_script('''
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
 
-            # 启用流量监控
-            reset_traffic_monitor()
-            enable_traffic_monitor(page)
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
+                };
 
-            result = login_with_url_state(page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT)
-            if result == "rate_limited":
-                print(f"\n[Worker-{worker_id}] [ERROR] IP 被风控")
-                return False
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
 
-            if result == "need_register":
-                print(f"\n[Worker-{worker_id}] 检测到账号未注册，启动注册流程...")
+                // 伪造 WebGL 信息
+                const getParameterProxyHandler = {
+                    apply: function(target, thisArg, args) {
+                        const param = args[0];
+                        // UNMASKED_VENDOR_WEBGL
+                        if (param === 37445) {
+                            return 'Google Inc. (Apple)';
+                        }
+                        // UNMASKED_RENDERER_WEBGL
+                        if (param === 37446) {
+                            return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
+                        }
+                        return Reflect.apply(target, thisArg, args);
+                    }
+                };
+
+                const originalGetContext = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                    const context = originalGetContext.call(this, type, attrs);
+                    if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+                        if (context && context.getParameter) {
+                            context.getParameter = new Proxy(context.getParameter, getParameterProxyHandler);
+                        }
+                    }
+                    return context;
+                };
+            ''')
+        else:
+            # 登录模式：简化配置（browser.py）
+            browser = p.chromium.launch(
+                headless=headless,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                ],
+                proxy=proxy_settings,
+            )
+            page = browser.new_page()
+
+        try:
+            if mode == "register":
+                # 注册模式
+                print(f"\n[Worker-{worker_id}] 模式: 注册")
                 reg_result = register_with_url_state(page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT)
                 if reg_result == "rate_limited":
                     print(f"\n[Worker-{worker_id}] [ERROR] IP 被风控")
                     return False
+                if reg_result == "already_registered":
+                    print(f"[Worker-{worker_id}] 账号已注册，请使用 login 模式")
+                    return "already_registered"
                 if not reg_result:
                     print(f"[Worker-{worker_id}] 注册失败")
                     return False
-            elif not result:
-                print(f"[Worker-{worker_id}] 登录失败")
-                return False
+            else:
+                # 登录模式
+                result = login_with_url_state(page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT)
+                if result == "rate_limited":
+                    print(f"\n[Worker-{worker_id}] [ERROR] IP 被风控")
+                    return False
+                if result == "need_register":
+                    print(f"[Worker-{worker_id}] 账号未注册，请使用 register 模式")
+                    return "need_register"
+                if not result:
+                    print(f"[Worker-{worker_id}] 登录失败")
+                    return False
 
             print(f"\n[Worker-{worker_id}] 访问 dashboard...")
-            try:
-                page.goto("https://www.binance.com/zh-CN/my/dashboard", wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
-                page.wait_for_timeout(random.randint(2500, 3500))
-            except Exception as e:
-                print(f"[Worker-{worker_id}] 访问 dashboard 失败: {e}")
+            dashboard_url = "https://www.binance.com/zh-CN/my/dashboard"
+            dashboard_loaded = False
+            for attempt in range(3):
+                try:
+                    page.goto(dashboard_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+                    page.wait_for_timeout(random.randint(2000, 3000))
+                    # 检查是否真正加载了 dashboard 页面
+                    current_url = page.url
+                    if "/my/dashboard" in current_url or "/my/" in current_url:
+                        dashboard_loaded = True
+                        break
+                    print(f"[Worker-{worker_id}] dashboard 页面未完全加载，重试 ({attempt + 1}/3)")
+                except Exception as e:
+                    print(f"[Worker-{worker_id}] 访问 dashboard 失败 ({attempt + 1}/3): {e}")
+                    page.wait_for_timeout(1000)
+
+            if not dashboard_loaded:
+                # 最后尝试等待页面稳定
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(2000)
 
             print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
             cookie_string, csrftoken = extract_cookies_and_csrf(page)
@@ -360,17 +452,5 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
             print(f"[Worker-{worker_id}] 处理过程出错: {e}")
             return False
         finally:
-            # 打印流量统计
-            print_traffic_summary()
-            # 打印本地缓存统计
-            if cache_enabled:
-                cache_manager = get_cache_manager()
-                if cache_manager:
-                    cache_manager.print_stats()
-
-            context.close()
             if browser:
                 browser.close()
-            # 同步新增缓存到 master
-            if cache_enabled:
-                _sync_new_cache_to_master(worker_id)

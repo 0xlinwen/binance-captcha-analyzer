@@ -1,10 +1,11 @@
 import random
 import logging
 import os
+import threading
 from datetime import datetime
 from io import StringIO
 
-from .captcha_solver import solve_captcha, solve_captcha_if_present, detect_captcha_type
+from .captcha_solver import solve_captcha_if_present
 from .email_imap import get_initial_mail_count, handle_email_verification
 from .web_actions import (
     click_button,
@@ -16,7 +17,18 @@ from .web_actions import (
 )
 
 
+# URL 状态机最大迭代次数
+MAX_TOTAL_ITERATIONS = 50
+# 单个 URL 状态最大重试次数
+MAX_URL_RETRIES = 10
+# 验证码最大连续失败次数
+MAX_CAPTCHA_FAILS = 3
+# MFA 最大重试次数
+MAX_MFA_RETRIES = 3
+
+
 # 全局日志文件（按日期）
+_logger_lock = threading.Lock()
 _daily_logger = None
 _daily_log_date = None
 # 失败日志文件句柄缓存（按账号）
@@ -28,52 +40,54 @@ def _get_daily_logger():
     global _daily_logger, _daily_log_date
     today = datetime.now().strftime("%Y-%m-%d")
 
-    if _daily_logger is None or _daily_log_date != today:
-        log_dir = "logs"
-        os.makedirs(log_dir, exist_ok=True)
+    with _logger_lock:
+        if _daily_logger is None or _daily_log_date != today:
+            log_dir = "logs"
+            os.makedirs(log_dir, exist_ok=True)
 
-        _daily_logger = logging.getLogger("binance_daily")
-        _daily_logger.setLevel(logging.INFO)
-        _daily_logger.handlers.clear()
+            _daily_logger = logging.getLogger("binance_daily")
+            _daily_logger.setLevel(logging.INFO)
+            _daily_logger.handlers.clear()
 
-        log_file = os.path.join(log_dir, f"{today}.log")
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s | %(message)s')
-        file_handler.setFormatter(formatter)
-        _daily_logger.addHandler(file_handler)
-        _daily_log_date = today
+            log_file = os.path.join(log_dir, f"{today}.log")
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s | %(message)s')
+            file_handler.setFormatter(formatter)
+            _daily_logger.addHandler(file_handler)
+            _daily_log_date = today
 
-    return _daily_logger
+        return _daily_logger
 
 
 def _get_failure_logger(email_addr):
     """获取账号专用的失败日志 logger（同账号多次重试写入同一文件）"""
     global _failure_loggers
 
-    if email_addr in _failure_loggers:
-        return _failure_loggers[email_addr]
+    with _logger_lock:
+        if email_addr in _failure_loggers:
+            return _failure_loggers[email_addr]
 
-    log_dir = "logs/failures"
-    os.makedirs(log_dir, exist_ok=True)
+        log_dir = "logs/failures"
+        os.makedirs(log_dir, exist_ok=True)
 
-    # 使用日期作为文件名的一部分，同一天同账号写入同一文件
-    today = datetime.now().strftime("%Y%m%d")
-    safe_email = email_addr.replace("@", "_at_").replace(".", "_")
-    log_file = os.path.join(log_dir, f"{safe_email}_{today}.log")
+        # 使用日期作为文件名的一部分，同一天同账号写入同一文件
+        today = datetime.now().strftime("%Y%m%d")
+        safe_email = email_addr.replace("@", "_at_").replace(".", "_")
+        log_file = os.path.join(log_dir, f"{safe_email}_{today}.log")
 
-    logger = logging.getLogger(f"failure_{email_addr}")
-    logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
+        logger = logging.getLogger(f"failure_{email_addr}")
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
 
-    file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
-    file_handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s | %(message)s')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+        file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
+        file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s | %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
-    _failure_loggers[email_addr] = logger
-    return logger
+        _failure_loggers[email_addr] = logger
+        return logger
 
 
 def setup_logger(email_addr):
@@ -95,7 +109,7 @@ def setup_logger(email_addr):
     logger.memory_stream = memory_stream
     logger.email_addr = email_addr
 
-    return logger, None
+    return logger
 
 
 def save_failure_log(logger, email_addr):
@@ -152,15 +166,45 @@ def console_log(email_addr, message, level="info"):
     print(f"[{short_email}] {prefix} {message}")
 
 
+# 风控检测关键词
 RISK_SIGNATURES = [
     "网络连接失败",
     "操作失败",
     "PRECHECK",
     "cap_too_many_attempts",
     "208075",
+    "208061",
     "认证失败，请刷新页面后重试",
     "$e.execute is not a function",
 ]
+
+
+def _handle_captcha_result(captcha_result, captcha_fail_count, email_addr, logger):
+    """
+    处理验证码结果的统一逻辑
+
+    Returns:
+        tuple: (should_stop, new_fail_count, stop_reason)
+        - should_stop: 是否应该停止流程
+        - new_fail_count: 更新后的失败计数
+        - stop_reason: 停止原因 ("rate_limited" / False / None)
+    """
+    if captcha_result == "rate_limited":
+        console_log(email_addr, "IP被风控，需更换代理", "error")
+        logger.error("IP 被风控，请更换代理或等待后重试")
+        return True, captcha_fail_count, "rate_limited"
+
+    if captcha_result is False:
+        captcha_fail_count += 1
+        console_log(email_addr, f"验证码失败 {captcha_fail_count}/{MAX_CAPTCHA_FAILS}", "warning")
+        logger.warning(f"验证码处理失败 ({captcha_fail_count}/{MAX_CAPTCHA_FAILS})")
+        if captcha_fail_count >= MAX_CAPTCHA_FAILS:
+            logger.error("验证码连续失败次数过多")
+            return True, captcha_fail_count, False
+        return False, captcha_fail_count, None
+
+    # 成功，重置计数
+    return False, 0, None
 
 
 def _is_page_blank(page, logger=None):
@@ -211,6 +255,9 @@ def _dismiss_error_popup(page, logger=None):
         "button:has-text('确定')",
         "button:has-text('关闭')",
         "button:has-text('Close')",
+        "button:has-text('取消')",
+        "button:has-text('Cancel')",
+        "[aria-label='Close']",
     ]
     for selector in dismiss_btns:
         try:
@@ -237,14 +284,26 @@ def _check_url_change(page, url_before, action_name, wait_ms=1000, logger=None):
         page: Playwright page对象
         url_before: 操作前的URL
         action_name: 操作名称（用于日志）
-        wait_ms: 等待时间（毫秒）
+        wait_ms: 最大等待时间（毫秒）
         logger: 日志对象
 
     Returns:
         新的URL
     """
     try:
-        page.wait_for_timeout(wait_ms)
+        # 轮询检测URL变化，每100ms检查一次
+        poll_interval = 100
+        max_polls = wait_ms // poll_interval
+        for _ in range(max_polls):
+            page.wait_for_timeout(poll_interval)
+            url_after = page.url
+            if url_after != url_before:
+                msg = f"URL变化 {action_name} 后: {url_before} -> {url_after}"
+                if logger:
+                    logger.info(msg)
+                return url_after
+
+        # 超时后返回当前URL
         url_after = page.url
         if url_after != url_before:
             msg = f"URL变化 {action_name} 后: {url_before} -> {url_after}"
@@ -262,9 +321,121 @@ def _check_url_change(page, url_before, action_name, wait_ms=1000, logger=None):
         return url_before
 
 
+def _wait_for_url_change(page, url_before, timeout_ms=5000, logger=None):
+    """
+    等待URL发生变化，用于关键操作后的页面跳转检测
+
+    Args:
+        page: Playwright page对象
+        url_before: 操作前的URL
+        timeout_ms: 最大等待时间（毫秒）
+        logger: 日志对象
+
+    Returns:
+        tuple: (changed: bool, new_url: str)
+    """
+    try:
+        poll_interval = 200
+        max_polls = timeout_ms // poll_interval
+        for i in range(max_polls):
+            page.wait_for_timeout(poll_interval)
+            url_after = page.url
+            if url_after != url_before:
+                if logger:
+                    logger.info(f"URL变化检测成功 ({(i+1)*poll_interval}ms): {url_before} -> {url_after}")
+                return True, url_after
+
+        # 超时
+        url_after = page.url
+        if url_after != url_before:
+            if logger:
+                logger.info(f"URL在超时边界变化: {url_before} -> {url_after}")
+            return True, url_after
+
+        if logger:
+            logger.info(f"URL等待超时 ({timeout_ms}ms)，未发生变化: {url_before}")
+        return False, url_before
+    except Exception as e:
+        if logger:
+            logger.error(f"_wait_for_url_change 异常: {e}")
+        return False, url_before
+
+
+def _wait_for_page_response(page, url_before, timeout_ms=5000, logger=None):
+    """
+    等待页面响应：URL变化 或 验证码弹窗出现
+
+    点击按钮后，页面可能：
+    1. URL跳转到新页面
+    2. 弹出验证码弹窗（URL不变）
+    3. 显示错误提示
+
+    Args:
+        page: Playwright page对象
+        url_before: 操作前的URL
+        timeout_ms: 最大等待时间（毫秒）
+        logger: 日志对象
+
+    Returns:
+        tuple: (response_type, new_url)
+        - response_type: "url_changed" / "captcha" / "timeout"
+        - new_url: 当前URL
+    """
+    # 验证码弹窗选择器
+    captcha_selectors = [
+        "#captcha-popup",
+        "[class*='captcha']",
+        "iframe[src*='captcha']",
+        "[data-testid='captcha']",
+        ".bds-modal",  # Binance modal
+        "[class*='Modal'][class*='captcha']",
+    ]
+
+    try:
+        poll_interval = 200
+        max_polls = timeout_ms // poll_interval
+
+        for i in range(max_polls):
+            page.wait_for_timeout(poll_interval)
+
+            # 检查URL变化
+            url_after = page.url
+            if url_after != url_before:
+                if logger:
+                    logger.info(f"页面响应: URL变化 ({(i+1)*poll_interval}ms): {url_before} -> {url_after}")
+                return "url_changed", url_after
+
+            # 检查验证码弹窗
+            for selector in captcha_selectors:
+                try:
+                    el = page.query_selector(selector)
+                    if el and el.is_visible():
+                        if logger:
+                            logger.info(f"页面响应: 验证码弹窗出现 ({(i+1)*poll_interval}ms): {selector}")
+                        return "captcha", url_after
+                except Exception:
+                    pass
+
+        # 超时后再检查一次
+        url_after = page.url
+        if url_after != url_before:
+            if logger:
+                logger.info(f"页面响应: URL在超时边界变化: {url_before} -> {url_after}")
+            return "url_changed", url_after
+
+        if logger:
+            logger.info(f"页面响应: 等待超时 ({timeout_ms}ms)，无变化")
+        return "timeout", url_before
+
+    except Exception as e:
+        if logger:
+            logger.error(f"_wait_for_page_response 异常: {e}")
+        return "timeout", url_before
+
+
 def login_with_url_state(page, email_addr, email_password, config, page_timeout=60000):
     # 设置日志
-    logger, log_file = setup_logger(email_addr)
+    logger = setup_logger(email_addr)
     start_time = datetime.now()
     short_email = email_addr.split("@")[0]
     console_log(email_addr, "开始登录")
@@ -291,16 +462,51 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
     consumed_codes = set()
     mfa_retry_count = 0
     last_stage = "login"  # 跟踪当前阶段
-
-    max_iterations = 20
     captcha_fail_count = 0  # 验证码连续失败计数
-    max_captcha_fails = 3   # 最大连续失败次数
 
-    for iteration in range(max_iterations):
+    # URL 状态计数器
+    url_retry_counts = {}  # {url_pattern: count}
+    last_url_pattern = None
+
+    def _get_url_pattern(url):
+        """提取 URL 的状态模式"""
+        if "/login/mfa" in url:
+            return "login_mfa"
+        elif "/login/password" in url:
+            return "login_password"
+        elif "/login/stay-signed-in" in url:
+            return "login_stay_signed_in"
+        elif "/login" in url and "/login/" not in url:
+            return "login"
+        elif "/my/" in url:
+            return "dashboard"
+        elif "authcenter/callback" in url:
+            return "callback"
+        else:
+            return "other"
+
+    for iteration in range(MAX_TOTAL_ITERATIONS):
         try:
             page.wait_for_timeout(1000)  # 固定等待1秒
             url = page.url
-            msg = f"迭代 {iteration + 1} 当前 URL: {url}"
+            url_pattern = _get_url_pattern(url)
+
+            # 检查 URL 状态是否变化
+            if url_pattern == last_url_pattern:
+                url_retry_counts[url_pattern] = url_retry_counts.get(url_pattern, 0) + 1
+                if url_retry_counts[url_pattern] >= MAX_URL_RETRIES:
+                    logger.warning(f"URL 状态 {url_pattern} 重试次数超过 {MAX_URL_RETRIES} 次，停止")
+                    console_log(email_addr, f"{url_pattern} 重试超限", "error")
+                    duration = (datetime.now() - start_time).total_seconds()
+                    log_summary(email_addr, False, duration, stage=last_stage, iterations=iteration+1, extra_info=f"{url_pattern}超限")
+                    save_failure_log(logger, email_addr)
+                    return False
+            else:
+                # URL 状态变化，重置该状态的计数
+                url_retry_counts[url_pattern] = 1
+                last_url_pattern = url_pattern
+
+            msg = f"迭代 {iteration + 1} URL状态: {url_pattern} (重试 {url_retry_counts.get(url_pattern, 1)}/{MAX_URL_RETRIES})"
             logger.info(msg)
 
             # 更新当前阶段
@@ -398,7 +604,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     initial_mail_count,
                     mfa_submit_retry=mfa_config.get("submit_retry", 2),
                     consumed_codes=consumed_codes,
+                    expected_url_pattern="/login/mfa",
                 )
+                # 处理 URL 跳转的情况
+                if ok == "url_changed":
+                    logger.info("邮件验证期间检测到 URL 跳转，继续状态机")
+                    continue
                 if not ok:
                     url_now = page.url
                     if "/my/" in url_now or "authcenter" in url_now or "/login/stay-signed-in" in url_now:
@@ -443,7 +654,7 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 mfa_retry_count += 1
                 console_log(email_addr, f"MFA重试 #{mfa_retry_count}", "warning")
                 logger.info(f"MFA 提交后仍停留在当前页，重试次数: {mfa_retry_count}")
-                if mfa_retry_count >= 3:
+                if mfa_retry_count >= MAX_MFA_RETRIES:
                     has_risk_now, _ = _has_risk_error(page)
                     if has_risk_now:
                         return "rate_limited"
@@ -473,7 +684,11 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 input_password(page, email_password)
                 page.wait_for_timeout(random.randint(400, 600))
                 click_button(page, ["继续", "Continue", "下一步", "Next"])
-                url = _check_url_change(page, url_before, "输入密码并点击继续", 1800, logger)
+
+                # 等待页面响应（URL变化或验证码弹窗）
+                response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
+                logger.info(f"密码页点击继续后响应类型: {response_type}")
+
             except Exception as e:
                 logger.info(f"输入密码或点击继续失败: {e}")
                 import traceback
@@ -489,22 +704,16 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 reload_url=login_start_url,
                 page_timeout=page_timeout,
             )
-            if captcha_result == "rate_limited":
-                console_log(email_addr, "IP被风控，需更换代理", "error")
-                logger.error("IP 被风控，请更换代理或等待后重试")
-                return "rate_limited"
+            should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                captcha_result, captcha_fail_count, email_addr, logger
+            )
+            if should_stop:
+                return stop_reason
             if captcha_result is False:
-                captcha_fail_count += 1
-                console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-                logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-                if captcha_fail_count >= max_captcha_fails:
-                    logger.error("验证码连续失败次数过多")
-                    return False
                 continue
-            captcha_fail_count = 0  # 成功则重置计数
 
-            # 验证码处理后再次检查URL
-            url = _check_url_change(page, url, "验证码处理", 500, logger)
+            # 验证码处理后等待URL变化（最多等待3秒）
+            changed, url = _wait_for_url_change(page, url, timeout_ms=3000, logger=logger)
             continue
 
         if "/login" in url and "/login/" not in url:
@@ -522,26 +731,21 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 reload_url=login_start_url,
                 page_timeout=page_timeout,
             )
-            if captcha_result == "rate_limited":
-                console_log(email_addr, "IP被风控，需更换代理", "error")
-                logger.error("IP 被风控，请更换代理或等待后重试")
-                return "rate_limited"
+            should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                captcha_result, captcha_fail_count, email_addr, logger
+            )
+            if should_stop:
+                return stop_reason
             if captcha_result is not True:
                 if captcha_result is False:
-                    captcha_fail_count += 1
-                    console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-                    logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-                    if captcha_fail_count >= max_captcha_fails:
-                        logger.error("验证码连续失败次数过多")
-                        return False
                     continue
-                url = _check_url_change(page, url_before, "验证码处理", 500, logger)
+                # 验证码处理后等待URL变化
+                changed, url = _wait_for_url_change(page, url_before, timeout_ms=3000, logger=logger)
                 continue
-            captcha_fail_count = 0  # 成功则重置计数
 
-            # 验证码处理成功后，检查URL是否已经跳转
-            url = _check_url_change(page, url_before, "验证码处理", 500, logger)
-            if url != url_before:
+            # 验证码处理成功后，等待URL变化（最多等待5秒）
+            changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
+            if changed:
                 # URL已经变化，跳到下一次迭代处理新的URL状态
                 logger.info(f"验证码处理后URL已变化，进入新状态: {url}")
                 continue
@@ -558,14 +762,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     logger.info("邮箱已输入，点击继续...")
                     click_login_continue_strict(page)
 
-                    # 点击后等待1-3秒
-                    wait_time = random.uniform(1000, 3000)
-                    page.wait_for_timeout(int(wait_time))
+                    # 等待页面响应（URL变化或验证码弹窗）
+                    response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
+                    logger.info(f"邮箱已输入点击继续后响应类型: {response_type}")
 
                     # 检查并点击"已知晓"按钮
                     _dismiss_error_popup(page, logger)
-
-                    url = _check_url_change(page, url_before, "点击继续", 500, logger)
 
                     # 检查页面是否提示未注册
                     if need_register(page):
@@ -584,14 +786,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             page.wait_for_timeout(random.randint(400, 600))
             click_login_continue_strict(page)
 
-            # 点击后等待1-3秒
-            wait_time = random.uniform(1000, 3000)
-            page.wait_for_timeout(int(wait_time))
+            # 等待页面响应（URL变化或验证码弹窗）
+            response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
+            logger.info(f"登录页输入邮箱后响应类型: {response_type}")
 
             # 检查并点击"已知晓"按钮
             _dismiss_error_popup(page, logger)
-
-            url = _check_url_change(page, url_before, "输入邮箱并点击继续", 2000, logger)
 
             # 检查页面是否提示未注册
             if need_register(page):
@@ -610,18 +810,15 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     reload_url=login_start_url,
                     page_timeout=page_timeout,
                 )
-                if post_captcha_result == "rate_limited":
-                    return "rate_limited"
+                should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                    post_captcha_result, captcha_fail_count, email_addr, logger
+                )
+                if should_stop:
+                    return stop_reason
                 if post_captcha_result is False:
-                    captcha_fail_count += 1
-                    console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-                    logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-                    if captcha_fail_count >= max_captcha_fails:
-                        logger.error("验证码连续失败次数过多")
-                        return False
                     continue
-                captcha_fail_count = 0  # 成功则重置计数
-                url = _check_url_change(page, url, "验证码处理", 500, logger)
+                # 验证码处理后等待URL变化
+                changed, url = _wait_for_url_change(page, url, timeout_ms=5000, logger=logger)
                 if "/login/password" not in url and "/login/mfa" not in url and "/my/" not in url:
                     # 检查是否有明确的未注册提示
                     if need_register(page):
@@ -653,33 +850,27 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             reload_url=login_start_url,
             page_timeout=page_timeout,
         )
-        if captcha_result == "rate_limited":
-            console_log(email_addr, "IP被风控，需更换代理", "error")
-            logger.error("IP 被风控，请更换代理或等待后重试")
-            return "rate_limited"
+        should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+            captcha_result, captcha_fail_count, email_addr, logger
+        )
+        if should_stop:
+            return stop_reason
         if captcha_result is False:
-            captcha_fail_count += 1
-            console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-            logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-            if captcha_fail_count >= max_captcha_fails:
-                logger.error("验证码连续失败次数过多")
-                return False
             continue
-        captcha_fail_count = 0  # 成功则重置计数
 
-        # 验证码处理后检查URL
-        url = _check_url_change(page, url_before, "兜底验证码处理", 500, logger)
+        # 验证码处理后等待URL变化（最多等待3秒）
+        changed, url = _wait_for_url_change(page, url_before, timeout_ms=3000, logger=logger)
 
     duration = (datetime.now() - start_time).total_seconds()
-    logger.warning("登录流程超过最大迭代次数")
-    log_summary(email_addr, False, duration, stage=last_stage, iterations=max_iterations, extra_info="超时")
+    logger.warning("登录流程超过最大总迭代次数")
+    log_summary(email_addr, False, duration, stage=last_stage, iterations=MAX_TOTAL_ITERATIONS, extra_info="总迭代超时")
     save_failure_log(logger, email_addr)
     return False
 
 
 def register_with_url_state(page, email_addr, email_password, config, page_timeout=60000):
     # 设置日志
-    logger, log_file = setup_logger(email_addr)
+    logger = setup_logger(email_addr)
     start_time = datetime.now()
     logger.info(f"开始注册: {email_addr}")
 
@@ -688,36 +879,162 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
     imap_host = config["imap_host"]
     imap_port = config["imap_port"]
 
-    
+    # 添加请求监控（调试风控）
+    request_log = []
+    def log_request(route, request):
+        if "binance.com" in request.url:
+            # 记录关键请求的详细信息
+            req_info = {
+                "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "method": request.method,
+                "url": request.url[:100],
+            }
+            # 对关键接口记录更多信息
+            if any(keyword in request.url for keyword in ["precheck", "getCaptcha", "validateCaptcha", "bizCheck", "check/result"]):
+                req_info["full_url"] = request.url
+                req_info["headers"] = {
+                    "user-agent": request.headers.get("user-agent", "")[:50],
+                    "referer": request.headers.get("referer", ""),
+                    "x-trace-id": request.headers.get("x-trace-id", ""),
+                    "clienttype": request.headers.get("clienttype", ""),
+                }
+            request_log.append(req_info)
+        route.continue_()
+
+    def log_response(response):
+        if "binance.com" in response.url and response.status >= 400:
+            logger.warning(f"错误响应: {response.status} {response.url[:100]}")
+            try:
+                body = response.text()
+                if "208061" in body or "208075" in body or "frequency" in body.lower():
+                    logger.error(f"风控响应内容: {body[:500]}")
+            except Exception:
+                pass
+
+    def cleanup_listeners():
+        """清理页面事件监听器"""
+        try:
+            page.unroute("**/*")
+        except Exception:
+            pass
+
+    page.route("**/*", log_request)
+    page.on("response", log_response)
+
     console_log(email_addr, "开始注册")
     logger.info("打开注册页面...")
     if not goto_with_retry(page, "https://www.binance.com/zh-CN/register", page_timeout=page_timeout):
         console_log(email_addr, "注册页面加载失败", "error")
         logger.error("注册页面加载失败")
+        cleanup_listeners()
         return False
+
+    # 模拟真实用户：页面加载后的自然行为
+    try:
+        # 等待页面完全加载
+        page.wait_for_timeout(random.randint(2000, 4000))
+
+        # 随机移动鼠标（模拟浏览页面）
+        for _ in range(random.randint(3, 6)):
+            x = random.randint(200, 1000)
+            y = random.randint(200, 700)
+            page.mouse.move(x, y, steps=random.randint(10, 20))
+            page.wait_for_timeout(random.randint(300, 800))
+
+        # 随机滚动页面
+        scroll_amount = random.randint(-100, 100)
+        page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+        page.wait_for_timeout(random.randint(500, 1500))
+
+        logger.info("完成页面浏览行为模拟")
+    except Exception as e:
+        logger.info(f"页面行为模拟异常: {e}")
 
     initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
     consumed_codes = set()
     captcha_fail_count = 0  # 验证码连续失败计数
-    max_captcha_fails = 3   # 最大连续失败次数
 
-    max_iterations = 20
-    for iteration in range(max_iterations):
-        page.wait_for_timeout(1000)  # 固定等待1秒
+    # URL 状态计数器
+    url_retry_counts = {}  # {url_pattern: count}
+    last_url_pattern = None
+
+    def _get_url_pattern(url):
+        """提取 URL 的状态模式"""
+        if "/register/verification" in url or "/verification-new-register" in url:
+            return "register_verification"
+        elif "/register/register-set-password" in url or "/register-set-password" in url:
+            return "register_password"
+        elif "/invite" in url:
+            return "invite"
+        elif "/register" in url and "/register/" not in url:
+            return "register"
+        elif "/my/" in url:
+            return "dashboard"
+        else:
+            return "other"
+
+    for iteration in range(MAX_TOTAL_ITERATIONS):
+        page.wait_for_timeout(random.randint(1800, 2500))  # 随机等待，与旧版本一致
         url = page.url
-        logger.info(f"注册迭代 {iteration + 1} 当前 URL: {url}")
+        url_pattern = _get_url_pattern(url)
 
-        # 检测浏览器错误页面（代理断开/网络问题），重新导航到注册页
-        if "chrome-error://" in url or "about:blank" in url:
-            logger.warning(f"检测到浏览器错误页面: {url}，重新导航到注册页...")
-            try:
-                page.goto("https://www.binance.com/zh-CN/register", timeout=page_timeout)
-                page.wait_for_timeout(2000)
-            except Exception as e:
-                logger.info(f"重新导航失败: {e}")
-            continue
+        # 检查 URL 状态是否变化
+        if url_pattern == last_url_pattern:
+            url_retry_counts[url_pattern] = url_retry_counts.get(url_pattern, 0) + 1
+            if url_retry_counts[url_pattern] >= MAX_URL_RETRIES:
+                logger.warning(f"URL 状态 {url_pattern} 重试次数超过 {MAX_URL_RETRIES} 次，停止")
+                console_log(email_addr, f"{url_pattern} 重试超限", "error")
+                duration = (datetime.now() - start_time).total_seconds()
+                log_summary(email_addr, False, duration, stage="register", iterations=iteration+1, extra_info=f"{url_pattern}超限")
+                save_failure_log(logger, email_addr)
+                cleanup_listeners()
+                return False
+        else:
+            # URL 状态变化，重置该状态的计数
+            url_retry_counts[url_pattern] = 1
+            last_url_pattern = url_pattern
 
-        # 检测白屏
+        logger.info(f"注册迭代 {iteration + 1} URL状态: {url_pattern} (重试 {url_retry_counts.get(url_pattern, 1)}/{MAX_URL_RETRIES})")
+
+        # 检测风控错误（208061/208075 等频率限制）
+        has_risk, body_text = _has_risk_error(page, logger)
+        if has_risk:
+            console_log(email_addr, "检测到风控错误", "warning")
+            logger.warning(f"风控错误，页面内容: {body_text[:300]}")
+            _dismiss_error_popup(page, logger)
+
+            # 对特定错误码进行重试（类似登录流程）
+            if ("208075" in body_text or "208061" in body_text or "网络连接失败" in body_text) and iteration < 5:
+                console_log(email_addr, "尝试刷新页面重试", "warning")
+                logger.warning("临时风控错误，刷新页面重试")
+                try:
+                    page.reload(timeout=10000)
+                except Exception:
+                    pass
+                # 更长的冷却时间
+                page.wait_for_timeout(random.randint(5000, 8000))
+                continue
+
+            # 其他风控错误才返回失败
+            console_log(email_addr, "检测到严重风控错误，停止注册", "error")
+            logger.error("严重风控错误，停止注册")
+
+            # 输出最近的请求日志
+            logger.error("=== 最近10个请求 ===")
+            for req in request_log[-10:]:
+                logger.error(f"{req['time']} {req['method']} {req['url']}")
+                if 'headers' in req:
+                    logger.error(f"  Headers: {req['headers']}")
+                if 'full_url' in req:
+                    logger.error(f"  Full URL: {req['full_url']}")
+
+            duration = (datetime.now() - start_time).total_seconds()
+            log_summary(email_addr, False, duration, stage="register", extra_info="风控限制")
+            save_failure_log(logger, email_addr)
+            cleanup_listeners()
+            return "rate_limited"
+
+        # 检测白屏（类似登录流程）
         if _is_page_blank(page, logger):
             console_log(email_addr, "检测到白屏，刷新页面", "warning")
             logger.warning("检测到白屏，刷新页面")
@@ -728,12 +1045,44 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             page.wait_for_timeout(2000)
             continue
 
+        # 检测"已存在账户"弹窗（账号已注册）
+        try:
+            body_text = page.inner_text("body")
+            if "已经存在账户" in body_text or "已存在账户" in body_text or "account already exists" in body_text.lower():
+                # 尝试关闭弹窗
+                close_buttons = [
+                    "button:has-text('关闭')",
+                    "button:has-text('Close')",
+                    "[aria-label='Close']",
+                    ".close",
+                    "button:has-text('取消')",
+                    "button:has-text('Cancel')",
+                ]
+                for selector in close_buttons:
+                    try:
+                        btn = page.query_selector(selector)
+                        if btn and btn.is_visible():
+                            btn.click()
+                            page.wait_for_timeout(500)
+                            break
+                    except Exception:
+                        pass
+                console_log(email_addr, "账号已注册", "warning")
+                logger.info("检测到账号已注册弹窗")
+                duration = (datetime.now() - start_time).total_seconds()
+                log_summary(email_addr, False, duration, stage="register", extra_info="已注册")
+                cleanup_listeners()
+                return "already_registered"
+        except Exception:
+            pass
+
         if "/invite" in url:
             console_log(email_addr, "invite: 点击下一步")
             logger.info("invite - 点击下一步")
             url_before = url
             click_button(page, ["下一步", "Next", "跳过", "Skip"])
-            url = _check_url_change(page, url_before, "点击下一步", 1500, logger)
+            # 等待URL变化（最多等待3秒）
+            changed, url = _wait_for_url_change(page, url_before, timeout_ms=3000, logger=logger)
             continue
 
         if "/register/register-set-password" in url or "/register-set-password" in url:
@@ -743,34 +1092,45 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             input_password(page, email_password)
             page.wait_for_timeout(random.randint(400, 600))
             click_button(page, ["继续", "Continue", "下一步", "Next"])
-            url = _check_url_change(page, url_before, "输入密码并点击继续", 1800, logger)
 
-            # 某些场景会出现多轮验证码：点击继续后立即重复检测并处理
-            for _ in range(3):
-                captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
-                if captcha_result == "rate_limited":
-                    return "rate_limited"
-                if captcha_result is False:
-                    captcha_fail_count += 1
-                    console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-                    logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-                    if captcha_fail_count >= max_captcha_fails:
-                        logger.error("验证码连续失败次数过多")
-                        return False
-                    break
-                captcha_fail_count = 0
-                url = _check_url_change(page, url, "验证码处理", 500, logger)
-                if "/register/register-set-password" not in url and "/register-set-password" not in url:
-                    break
-                # 不再重复点击"继续"，只等待验证码刷新
-                page.wait_for_timeout(random.randint(1200, 1800))
+            # 等待URL变化（最多等待3秒）
+            changed, url = _wait_for_url_change(page, url_before, timeout_ms=3000, logger=logger)
+
+            # 单次验证码处理，让状态机的迭代循环来处理重试
+            captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+            should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                captcha_result, captcha_fail_count, email_addr, logger
+            )
+            if should_stop:
+                cleanup_listeners()
+                return stop_reason
+            if captcha_result is False:
+                # 验证码失败后增加冷却时间
+                cooldown = random.randint(8000, 15000)
+                console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
+                page.wait_for_timeout(cooldown)
+
+            # 验证码处理后等待URL变化（最多等待5秒）
+            changed, url_after = _wait_for_url_change(page, url, timeout_ms=5000, logger=logger)
+
+            # 如果验证码通过但URL仍然是密码页，说明可能被风控重置了
+            if captcha_result is True and ("/register/register-set-password" in url_after or "/register-set-password" in url_after):
+                console_log(email_addr, "验证码通过但页面未跳转，可能触发风控", "error")
+                logger.error("验证码通过但页面停留在密码页，疑似风控")
+                duration = (datetime.now() - start_time).total_seconds()
+                log_summary(email_addr, False, duration, stage="register", extra_info="验证码后风控")
+                save_failure_log(logger, email_addr)
+                cleanup_listeners()
+                return "rate_limited"
+
+            url = url_after
             continue
 
         if "/register/verification" in url or "/verification-new-register" in url:
             console_log(email_addr, "verification: 处理邮件验证码")
             logger.info("verification - 处理邮件验证码")
             url_before = url
-            if not handle_email_verification(
+            result = handle_email_verification(
                 page,
                 imap_host,
                 imap_port,
@@ -778,16 +1138,41 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 email_password,
                 initial_mail_count,
                 consumed_codes=consumed_codes,
-            ):
+                expected_url_pattern="/register/verification",
+            )
+            # 处理 URL 跳转的情况
+            if result == "url_changed":
+                logger.info("邮件验证期间检测到 URL 跳转，继续状态机")
+                url = page.url
+                continue
+            if not result:
                 logger.error("邮件验证失败")
+                cleanup_listeners()
                 return False
-            url = _check_url_change(page, url_before, "邮件验证", 2500, logger)
+            # 等待URL变化（最多等待5秒）
+            changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
             continue
 
         if "/register" in url and "/register/" not in url:
             console_log(email_addr, "register: 输入邮箱")
             logger.info("register - 输入邮箱")
             url_before = url
+
+            # 模拟真实用户行为：随机移动鼠标、停顿
+            try:
+                # 随机移动鼠标到页面不同位置
+                for _ in range(random.randint(2, 4)):
+                    x = random.randint(100, 800)
+                    y = random.randint(100, 600)
+                    page.mouse.move(x, y)
+                    page.wait_for_timeout(random.randint(200, 500))
+
+                # 随机滚动页面
+                page.evaluate(f"window.scrollBy(0, {random.randint(-50, 50)})")
+                page.wait_for_timeout(random.randint(300, 800))
+            except Exception:
+                pass
+
             input_email(page, email_addr)
             page.wait_for_timeout(random.randint(400, 600))
 
@@ -803,55 +1188,85 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             page.wait_for_timeout(random.randint(400, 600))
             initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
             click_button(page, ["继续", "Continue", "下一步", "Next"])
-            url = _check_url_change(page, url_before, "输入邮箱并点击继续", 2500, logger)
 
-            # 注册页会连续出现"继续 -> 验证码 -> 继续 -> 验证码"
-            # 同一轮内做闭环，避免等下一轮状态机再处理
-            for _ in range(4):
-                captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
-                if captcha_result == "rate_limited":
+            # 等待URL变化（最多等待5秒）
+            changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
+
+            # 单次验证码处理，让状态机的迭代循环来处理重试
+            captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+            should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                captcha_result, captcha_fail_count, email_addr, logger
+            )
+            if should_stop:
+                cleanup_listeners()
+                return stop_reason
+            if captcha_result is False:
+                # 验证码失败后增加冷却时间
+                cooldown = random.randint(8000, 15000)
+                console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
+                page.wait_for_timeout(cooldown)
+
+            # 验证码处理后等待URL变化（最多等待5秒）
+            changed, url_after = _wait_for_url_change(page, url, timeout_ms=5000, logger=logger)
+
+            # 如果验证码通过但URL仍然是注册页，说明可能被风控重置了
+            if captcha_result is True and "/register" in url_after and "/register/" not in url_after:
+                console_log(email_addr, "验证码通过但页面未跳转，检查是否风控", "warning")
+                logger.warning("验证码通过但页面回到注册页，检查页面内容")
+
+                # 检查页面是否有风控错误
+                page.wait_for_timeout(2000)  # 等待错误信息加载
+                has_risk_now, body_text = _has_risk_error(page, logger)
+                if has_risk_now:
+                    console_log(email_addr, "确认触发风控，停止注册", "error")
+                    logger.error(f"风控错误内容: {body_text[:500]}")
+
+                    # 输出最近的请求日志
+                    logger.error("=== 最近10个请求 ===")
+                    for req in request_log[-10:]:
+                        logger.error(f"{req['time']} {req['method']} {req['url']}")
+                        if 'headers' in req:
+                            logger.error(f"  Headers: {req['headers']}")
+                        if 'full_url' in req:
+                            logger.error(f"  Full URL: {req['full_url']}")
+
+                    duration = (datetime.now() - start_time).total_seconds()
+                    log_summary(email_addr, False, duration, stage="register", extra_info="验证码后风控")
+                    save_failure_log(logger, email_addr)
+                    cleanup_listeners()
                     return "rate_limited"
-                if captcha_result is False:
-                    captcha_fail_count += 1
-                    console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-                    logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-                    if captcha_fail_count >= max_captcha_fails:
-                        logger.error("验证码连续失败次数过多")
-                        return False
-                    break
-                captcha_fail_count = 0
-                url = _check_url_change(page, url, "验证码处理", 500, logger)
-                if "/register" not in url or "/register/" in url:
-                    break
-                # 不再重复点击"继续"，只等待验证码刷新
-                page.wait_for_timeout(random.randint(1500, 2200))
+                else:
+                    # 可能只是页面跳转慢，继续下一轮
+                    console_log(email_addr, "未检测到风控错误，继续尝试", "warning")
+                    logger.warning("页面未跳转但无风控错误，继续")
+
+            url = url_after
             continue
 
         if "/my/" in url or ("binance.com" in url and "register" not in url and "login" not in url):
             duration = (datetime.now() - start_time).total_seconds()
             logger.info("注册成功!")
             log_summary(email_addr, True, duration, stage="dashboard", iterations=iteration+1)
+            cleanup_listeners()
             return True
 
         url_before = url
         captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
-        if captcha_result == "rate_limited":
-            return "rate_limited"
+        should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+            captcha_result, captcha_fail_count, email_addr, logger
+        )
+        if should_stop:
+            cleanup_listeners()
+            return stop_reason
         if captcha_result is False:
-            captcha_fail_count += 1
-            console_log(email_addr, f"验证码失败 {captcha_fail_count}/{max_captcha_fails}", "warning")
-            logger.warning(f"验证码处理失败 ({captcha_fail_count}/{max_captcha_fails})")
-            if captcha_fail_count >= max_captcha_fails:
-                logger.error("验证码连续失败次数过多")
-                return False
             continue
-        captcha_fail_count = 0
 
-        # 验证码处理后检查URL
-        url = _check_url_change(page, url_before, "兜底验证码处理", 500, logger)
+        # 验证码处理后等待URL变化（最多等待3秒）
+        changed, url = _wait_for_url_change(page, url_before, timeout_ms=3000, logger=logger)
 
     duration = (datetime.now() - start_time).total_seconds()
-    logger.warning("注册流程超过最大迭代次数")
-    log_summary(email_addr, False, duration, stage="register", iterations=max_iterations, extra_info="超时")
+    logger.warning("注册流程超过最大总迭代次数")
+    log_summary(email_addr, False, duration, stage="register", iterations=MAX_TOTAL_ITERATIONS, extra_info="总迭代超时")
     save_failure_log(logger, email_addr)
+    cleanup_listeners()
     return False

@@ -4,9 +4,9 @@
 """
 
 import hashlib
-import os
 import json
 import time
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -142,19 +142,22 @@ class LocalCacheManager:
 
 
 # 全局实例
+_cache_lock = threading.Lock()
 _cache_manager = None
 
 
 def get_cache_manager(cache_dir: Path = None) -> LocalCacheManager:
     """获取缓存管理器单例"""
     global _cache_manager
-    if _cache_manager is None and cache_dir:
-        _cache_manager = LocalCacheManager(cache_dir)
-    return _cache_manager
+    with _cache_lock:
+        if _cache_manager is None and cache_dir:
+            _cache_manager = LocalCacheManager(cache_dir)
+        return _cache_manager
 
 
 def init_cache_manager(cache_dir: Path):
     """初始化缓存管理器"""
     global _cache_manager
-    _cache_manager = LocalCacheManager(cache_dir)
-    return _cache_manager
+    with _cache_lock:
+        _cache_manager = LocalCacheManager(cache_dir)
+        return _cache_manager

@@ -2,4 +2,4 @@ playwright
 requests
 opencv-python
 numpy
-scikit-image
+psutil

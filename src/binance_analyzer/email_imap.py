@@ -92,6 +92,7 @@ def get_email_verification_code(
 
     start_time = time.time()
     while time.time() - start_time < timeout:
+        mail = None
         try:
             mail = imaplib.IMAP4_SSL(imap_host, imap_port)
             mail.login(username, password)
@@ -99,14 +100,12 @@ def get_email_verification_code(
 
             _, messages = mail.search(None, "ALL")
             if not messages[0]:
-                mail.logout()
                 time.sleep(3)
                 continue
 
             mail_ids = messages[0].split()
             current_count = len(mail_ids)
             if current_count <= initial_count:
-                mail.logout()
                 print(f"等待新邮件... (当前: {current_count})")
                 time.sleep(3)
                 continue
@@ -126,12 +125,16 @@ def get_email_verification_code(
                     code = _extract_code_from_message(msg)
                     if code and code not in consumed_codes:
                         consumed_codes.add(code)
-                        mail.logout()
                         print(f"找到验证码: {code}")
                         return code
-            mail.logout()
         except Exception as e:
             print(f"IMAP 错误: {e}")
+        finally:
+            if mail:
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
 
         time.sleep(3)
 
@@ -148,9 +151,30 @@ def handle_email_verification(
     initial_count,
     mfa_submit_retry=2,
     consumed_codes=None,
+    expected_url_pattern=None,
 ):
     # 等待页面加载完成
     page.wait_for_timeout(2000)
+
+    # 记录初始 URL，用于检测页面跳转
+    initial_url = page.url
+
+    def _check_url_redirect():
+        """检查页面是否跳转到其他页面（如登录页）"""
+        try:
+            current_url = page.url
+            # 如果指定了期望的 URL 模式，检查是否匹配
+            if expected_url_pattern and expected_url_pattern not in current_url:
+                print(f"[URL变化] 页面已跳转: {current_url}")
+                return True
+            # 如果跳转到登录首页（非 mfa/password 子页面），说明验证失败
+            if "/login" in current_url and "/login/mfa" not in current_url and "/login/password" not in current_url:
+                if "/login/mfa" in initial_url or "/register/verification" in initial_url:
+                    print(f"[URL变化] 从验证页跳转回登录页: {current_url}")
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _dismiss_auth_error_popup():
         """检测并关闭认证失败弹窗"""
@@ -252,7 +276,7 @@ def handle_email_verification(
                     try:
                         el = frame.query_selector(selector)
                         if el and el.is_visible():
-                            print(f"[DEBUG] 在 iframe 中找到验证码输入框: {frame.url}")
+                            print(f"在 iframe 中找到验证码输入框: {frame.url}")
                             return el, frame
                     except Exception:
                         pass
@@ -262,9 +286,13 @@ def handle_email_verification(
         return None, None
 
     code_input = None
-    code_frame = None
     # 尝试多次查找，等待元素出现
     for retry in range(10):
+        # 检测 URL 是否跳转
+        if _check_url_redirect():
+            print("检测到页面跳转，退出邮件验证流程")
+            return "url_changed"
+
         # 检测并关闭认证失败弹窗
         _dismiss_auth_error_popup()
 
@@ -272,7 +300,7 @@ def handle_email_verification(
         if retry == 0:
             _click_get_code_button()
 
-        code_input, code_frame = _find_code_input()
+        code_input, _ = _find_code_input()
         if code_input:
             print(f"找到验证码输入框")
             break
@@ -280,6 +308,9 @@ def handle_email_verification(
         page.wait_for_timeout(1500)
 
     if not code_input:
+        # 最后再检查一次 URL
+        if _check_url_redirect():
+            return "url_changed"
         return False
 
     email_code = get_email_verification_code(
@@ -293,18 +324,27 @@ def handle_email_verification(
     )
     if not email_code:
         print("未能获取邮件验证码")
+        # 检查是否因为 URL 跳转导致
+        if _check_url_redirect():
+            return "url_changed"
         return False
 
     # 重新查找输入框（等待邮件期间页面可能刷新）
     code_input = None
     for retry in range(3):
-        code_input, code_frame = _find_code_input()
+        # 检测 URL 是否跳转
+        if _check_url_redirect():
+            print("等待邮件期间页面跳转，退出邮件验证流程")
+            return "url_changed"
+        code_input, _ = _find_code_input()
         if code_input:
             break
         page.wait_for_timeout(500)
 
     if not code_input:
         print("填充验证码时未找到输入框")
+        if _check_url_redirect():
+            return "url_changed"
         return False
 
     print(f"输入验证码: {email_code}")

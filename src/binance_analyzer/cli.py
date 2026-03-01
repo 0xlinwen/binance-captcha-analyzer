@@ -22,8 +22,14 @@ def process_account(args):
     for attempt in range(max_retries):
         try:
             result = register_account(base_dir, email_addr, password, config, worker_id=worker_id)
-            if result:
+            if result is True:
                 return email_addr, True
+            # 账号已注册，不需要重试
+            if result == "already_registered":
+                return email_addr, "already_registered"
+            # 账号未注册，不需要重试
+            if result == "need_register":
+                return email_addr, "need_register"
             # 登录失败，重试
             if attempt < max_retries - 1:
                 print(f"[{short_email}] ⟳ 重试 {attempt + 2}/{max_retries}")
@@ -131,6 +137,8 @@ def main():
     screenshots_dir = base_dir / "screenshots"
     success_count = 0
     fail_count = 0
+    already_registered_count = 0
+    need_register_count = 0
 
     # 为每个任务分配 worker_id（循环使用 0 到 max_workers-1）
     tasks = [(base_dir, acc, config, i, i % max_workers) for i, acc in enumerate(accounts)]
@@ -141,12 +149,22 @@ def main():
             futures = {executor.submit(process_account, task): task[1][0] for task in tasks}
             for future in as_completed(futures):
                 try:
-                    email_addr, success = future.result()
-                    if success:
+                    email_addr, result = future.result()
+                    if result is True:
                         success_count += 1
+                    elif result == "already_registered":
+                        already_registered_count += 1
+                    elif result == "need_register":
+                        need_register_count += 1
                     else:
                         fail_count += 1
-                    print(f"进度: {success_count + fail_count}/{len(accounts)} | 成功: {success_count} | 失败: {fail_count}")
+                    total = success_count + fail_count + already_registered_count + need_register_count
+                    status = f"进度: {total}/{len(accounts)} | 成功: {success_count} | 失败: {fail_count}"
+                    if already_registered_count > 0:
+                        status += f" | 已注册: {already_registered_count}"
+                    if need_register_count > 0:
+                        status += f" | 未注册: {need_register_count}"
+                    print(status)
                 except Exception as e:
                     fail_count += 1
                     print(f"任务异常: {e}")

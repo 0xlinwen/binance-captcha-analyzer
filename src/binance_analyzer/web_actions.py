@@ -167,6 +167,11 @@ def click_login_continue_strict(page):
         "button:has-text('Continue')",
         "button:has-text('下一步')",
         "button:has-text('Next')",
+        # 更宽泛的选择器
+        "button[type='submit']",
+        "[data-e2e='btn-submit']",
+        "[data-testid='btn-submit']",
+        "form button",
     ]
 
     def _is_passkey_button(btn):
@@ -213,10 +218,46 @@ def click_login_continue_strict(page):
         except Exception:
             pass
 
-    # Fallback: submit via Enter on email input to avoid random wrong button click.
+    # 尝试通过 JavaScript 查找并点击按钮
+    try:
+        clicked = page.evaluate(
+            """() => {
+                // 查找所有按钮
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    const text = (btn.innerText || '').toLowerCase();
+                    // 排除 passkey 相关按钮
+                    if (text.includes('通行密钥') || text.includes('passkey')) continue;
+                    // 查找继续/下一步按钮
+                    if (text.includes('继续') || text.includes('continue') ||
+                        text.includes('下一步') || text.includes('next')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                // 查找 submit 类型按钮
+                const submitBtns = document.querySelectorAll('button[type="submit"]');
+                for (const btn of submitBtns) {
+                    const text = (btn.innerText || '').toLowerCase();
+                    if (text.includes('通行密钥') || text.includes('passkey')) continue;
+                    if (btn.offsetParent !== null) {  // 可见
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }"""
+        )
+        if clicked:
+            print("通过 JavaScript 点击了继续按钮")
+            return True
+    except Exception as e:
+        print(f"JavaScript 点击按钮失败: {e}")
+
+    # 最后尝试回车提交
     try:
         email_input.press("Enter")
-        print("未找到安全的继续按钮，改为邮箱输入框回车提交")
+        print("未找到继续按钮，使用回车提交")
         return True
     except Exception:
         return False
@@ -228,6 +269,11 @@ def input_password(page, password):
     if password_input:
         password_input.click()
         time.sleep(random.uniform(0.1, 0.2))
+        # 清空已有内容再输入
+        current_value = password_input.input_value()
+        if current_value:
+            password_input.fill("")
+            time.sleep(random.uniform(0.1, 0.2))
         password_input.type(password, delay=random.randint(30, 80))
         print("密码已输入")
         return True
@@ -240,6 +286,8 @@ def need_register(page):
     return (
         "未注册" in page_text
         or "没有账号" in page_text
+        or "未找到币安账户" in page_text
+        or "未找到币安账号" in page_text
         or "未找到" in page_text
         or "找不到" in page_text
         or "账号不存在" in page_text
@@ -269,11 +317,12 @@ def goto_with_retry(page, url, page_timeout, max_retries=3):
                 "网络连接失败", "network error", "连接失败", "connection failed",
                 "请稍后重试", "please try again", "操作失败", "operation failed",
                 "403", "forbidden", "blocked", "拒绝访问",
-                "cap_too_many_attempts", "208075", "$e.execute is not a function",
+                "cap_too_many_attempts", "208075", "208061", "$e.execute is not a function",
             ]
             for keyword in error_keywords:
                 if keyword.lower() in body_text.lower():
                     print(f"检测到错误关键词: {keyword}")
+                    return False
             return True
         except Exception as e:
             print(f"页面加载失败 (尝试 {attempt + 1}/{max_retries}): {e}")
