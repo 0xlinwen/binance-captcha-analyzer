@@ -186,8 +186,8 @@ python captcha_analyzer.py --refresh-cache
 | 浏览器启动 | `chromium.launch()` 简化配置 | `chromium.launch()` 完整反检测 |
 | 用户数据目录 | 无（每次全新浏览器） | 无（每次全新浏览器） |
 | 反检测脚本 | 无 | 完整 WebGL 伪造 |
-| User-Agent | 默认 | 自定义 Chrome 120 |
-| 视口大小 | 默认 | 1920x1080 |
+| User-Agent | 默认 | 默认 |
+| 视口大小 | 默认 | 默认 |
 | 时区/语言 | 默认 | Asia/Shanghai, zh-CN |
 
 ### 登录模式浏览器配置
@@ -226,8 +226,6 @@ browser = p.chromium.launch(
 )
 
 context = browser.new_context(
-    viewport={'width': 1920, 'height': 1080},
-    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     locale='zh-CN',
     timezone_id='Asia/Shanghai',
     proxy=proxy_settings,
