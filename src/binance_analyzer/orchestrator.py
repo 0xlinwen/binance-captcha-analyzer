@@ -9,6 +9,7 @@ from .flows import login_with_url_state, register_with_url_state
 from .storage import save_registered_account
 from .traffic_monitor import mark_cached_url
 from .local_cache import init_cache_manager, get_cache_manager
+from .fingerprint import generate_fingerprint
 
 PAGE_TIMEOUT = 60000
 
@@ -300,7 +301,10 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
             print(f"[Worker-{worker_id}] 使用代理: {server}")
 
         if is_register_mode:
-            # 注册模式：使用完整的反检测配置（browser_multi.py）
+            # 注册模式：使用完整的反检测配置 + 随机指纹
+            fingerprint = generate_fingerprint()
+            print(f"[Worker-{worker_id}] 指纹: {fingerprint['user_agent'][-30:]} | {fingerprint['timezone_id']} | {fingerprint['webgl_renderer'][-20:]}")
+
             browser = p.chromium.launch(
                 headless=headless,
                 args=[
@@ -308,66 +312,73 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-infobars',
-                    '--window-size=1920,1080',
+                    f'--window-size={fingerprint["viewport"]["width"]},{fingerprint["viewport"]["height"]}',
                     '--start-maximized',
                 ]
             )
             context = browser.new_context(
-                locale='zh-CN',
-                timezone_id='Asia/Shanghai',
+                viewport=fingerprint['viewport'],
+                user_agent=fingerprint['user_agent'],
+                locale=fingerprint['locale'],
+                timezone_id=fingerprint['timezone_id'],
                 proxy=proxy_settings,
             )
             page = context.new_page()
 
-            # 完整的反检测脚本（包含 WebGL 伪造）
-            page.add_init_script('''
-                Object.defineProperty(navigator, 'webdriver', {
+            # 完整的反检测脚本（包含随机 WebGL 伪造）
+            webgl_vendor = fingerprint['webgl_vendor']
+            webgl_renderer = fingerprint['webgl_renderer']
+            page.add_init_script(f'''
+                Object.defineProperty(navigator, 'webdriver', {{
                     get: () => undefined
-                });
+                }});
 
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
+                window.chrome = {{
+                    runtime: {{}},
+                    loadTimes: function() {{}},
+                    csi: function() {{}},
+                    app: {{}}
+                }};
 
                 const originalQuery = window.navigator.permissions.query;
                 window.navigator.permissions.query = (parameters) => (
                     parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
+                        Promise.resolve({{ state: Notification.permission }}) :
                         originalQuery(parameters)
                 );
 
                 // 伪造 WebGL 信息
-                const getParameterProxyHandler = {
-                    apply: function(target, thisArg, args) {
+                const getParameterProxyHandler = {{
+                    apply: function(target, thisArg, args) {{
                         const param = args[0];
                         // UNMASKED_VENDOR_WEBGL
-                        if (param === 37445) {
-                            return 'Google Inc. (Apple)';
-                        }
+                        if (param === 37445) {{
+                            return '{webgl_vendor}';
+                        }}
                         // UNMASKED_RENDERER_WEBGL
-                        if (param === 37446) {
-                            return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
-                        }
+                        if (param === 37446) {{
+                            return '{webgl_renderer}';
+                        }}
                         return Reflect.apply(target, thisArg, args);
-                    }
-                };
+                    }}
+                }};
 
                 const originalGetContext = HTMLCanvasElement.prototype.getContext;
-                HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                HTMLCanvasElement.prototype.getContext = function(type, attrs) {{
                     const context = originalGetContext.call(this, type, attrs);
-                    if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
-                        if (context && context.getParameter) {
+                    if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {{
+                        if (context && context.getParameter) {{
                             context.getParameter = new Proxy(context.getParameter, getParameterProxyHandler);
-                        }
-                    }
+                        }}
+                    }}
                     return context;
-                };
+                }};
             ''')
         else:
-            # 登录模式：简化配置（browser.py）
+            # 登录模式：简化配置 + 随机指纹
+            fingerprint = generate_fingerprint()
+            print(f"[Worker-{worker_id}] 指纹: {fingerprint['user_agent'][-30:]} | {fingerprint['timezone_id']}")
+
             browser = p.chromium.launch(
                 headless=headless,
                 args=[
@@ -376,7 +387,13 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                 ],
                 proxy=proxy_settings,
             )
-            page = browser.new_page()
+            context = browser.new_context(
+                viewport=fingerprint['viewport'],
+                user_agent=fingerprint['user_agent'],
+                locale=fingerprint['locale'],
+                timezone_id=fingerprint['timezone_id'],
+            )
+            page = context.new_page()
 
         try:
             if mode == "register":

@@ -23,13 +23,16 @@ def process_account(args):
         try:
             result = register_account(base_dir, email_addr, password, config, worker_id=worker_id)
             if result is True:
-                return email_addr, True
+                return email_addr, password, True
             # 账号已注册，不需要重试
             if result == "already_registered":
-                return email_addr, "already_registered"
+                return email_addr, password, "already_registered"
             # 账号未注册，不需要重试
             if result == "need_register":
-                return email_addr, "need_register"
+                return email_addr, password, "need_register"
+            # IMAP 认证失败，不需要重试
+            if result == "imap_auth_failed":
+                return email_addr, password, "imap_auth_failed"
             # 登录失败，重试
             if attempt < max_retries - 1:
                 print(f"[{short_email}] ⟳ 重试 {attempt + 2}/{max_retries}")
@@ -40,7 +43,7 @@ def process_account(args):
                 print(f"[{short_email}] ⟳ 重试 {attempt + 2}/{max_retries}")
                 time.sleep(2)
 
-    return email_addr, False
+    return email_addr, password, False
 
 
 def signal_handler(signum, frame):
@@ -135,10 +138,17 @@ def main():
         print("本地缓存: 已禁用")
 
     screenshots_dir = base_dir / "screenshots"
+    output_dir = base_dir / "output"
+    output_dir.mkdir(exist_ok=True)
+
+    success_file = output_dir / "success_accounts.txt"
+    failed_file = output_dir / "failed_accounts.txt"
+
     success_count = 0
     fail_count = 0
     already_registered_count = 0
     need_register_count = 0
+    imap_auth_failed_count = 0
 
     # 为每个任务分配 worker_id（循环使用 0 到 max_workers-1）
     tasks = [(base_dir, acc, config, i, i % max_workers) for i, acc in enumerate(accounts)]
@@ -146,24 +156,38 @@ def main():
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             executor_ref = executor
-            futures = {executor.submit(process_account, task): task[1][0] for task in tasks}
+            futures = {executor.submit(process_account, task): task[1] for task in tasks}
             for future in as_completed(futures):
                 try:
-                    email_addr, result = future.result()
+                    email_addr, password, result = future.result()
                     if result is True:
                         success_count += 1
+                        with open(success_file, "a") as f:
+                            f.write(f"{email_addr}:{password}\n")
                     elif result == "already_registered":
                         already_registered_count += 1
+                        with open(success_file, "a") as f:
+                            f.write(f"{email_addr}:{password}\n")
                     elif result == "need_register":
                         need_register_count += 1
+                        with open(failed_file, "a") as f:
+                            f.write(f"{email_addr}:{password}\n")
+                    elif result == "imap_auth_failed":
+                        imap_auth_failed_count += 1
+                        with open(failed_file, "a") as f:
+                            f.write(f"{email_addr}:{password}\n")
                     else:
                         fail_count += 1
-                    total = success_count + fail_count + already_registered_count + need_register_count
+                        with open(failed_file, "a") as f:
+                            f.write(f"{email_addr}:{password}\n")
+                    total = success_count + fail_count + already_registered_count + need_register_count + imap_auth_failed_count
                     status = f"进度: {total}/{len(accounts)} | 成功: {success_count} | 失败: {fail_count}"
                     if already_registered_count > 0:
                         status += f" | 已注册: {already_registered_count}"
                     if need_register_count > 0:
                         status += f" | 未注册: {need_register_count}"
+                    if imap_auth_failed_count > 0:
+                        status += f" | IMAP失败: {imap_auth_failed_count}"
                     print(status)
                 except Exception as e:
                     fail_count += 1

@@ -75,6 +75,10 @@ src/binance_analyzer/
   storage.py                           # 账号文件读取、结果写入（文件锁）
   local_cache.py                       # 应用层静态资源缓存
   traffic_monitor.py                   # 流量统计（按类型/域名/请求）
+  fingerprint.py                       # 浏览器指纹随机化（UA/时区/WebGL）
+output/
+  success_accounts.txt                 # 登录成功的账号
+  failed_accounts.txt                  # 登录失败的账号
 ```
 
 ## 安装
@@ -179,61 +183,94 @@ python captcha_analyzer.py --refresh-cache
 
 ### 登录模式 vs 注册模式
 
-登录和注册使用不同的浏览器配置策略：
+登录和注册使用不同的浏览器配置策略，均支持随机指纹：
 
 | 特性 | 登录模式 | 注册模式 |
 |------|----------|----------|
 | 浏览器启动 | `chromium.launch()` 简化配置 | `chromium.launch()` 完整反检测 |
 | 用户数据目录 | 无（每次全新浏览器） | 无（每次全新浏览器） |
 | 反检测脚本 | 无 | 完整 WebGL 伪造 |
-| User-Agent | 默认 | 默认 |
-| 视口大小 | 默认 | 默认 |
-| 时区/语言 | 默认 | Asia/Shanghai, zh-CN |
+| User-Agent | 随机 Chrome 120-124 | 随机 Chrome 120-124 |
+| 视口大小 | 1920x1080 | 1920x1080 |
+| 时区/语言 | 随机 | 随机 |
+| WebGL 伪造 | 无 | 随机显卡信息 |
+
+### 指纹随机化
+
+每个 worker 启动时会生成随机指纹，避免多窗口被关联检测：
+
+```python
+# fingerprint.py
+CHROME_VERSIONS = ['120.0.0.0', '121.0.0.0', '122.0.0.0', '123.0.0.0', '124.0.0.0']
+TIMEZONES = ['Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Singapore', 'Asia/Tokyo', 'America/New_York', 'Europe/London']
+LOCALES = ['zh-CN', 'zh-TW', 'en-US', 'en-GB', 'ja-JP']
+WEBGL_RENDERERS = [
+    'ANGLE (Apple, Apple M1, OpenGL 4.1)',
+    'ANGLE (Apple, Apple M2, OpenGL 4.1)',
+    'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, OpenGL 4.5)',
+    'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics, OpenGL 4.1)',
+    # ...
+]
+```
+
+启动时会打印指纹信息：
+```
+[Worker-0] 指纹: Chrome/122.0.0.0 Safari/537.36 | Asia/Hong_Kong | RTX 3060, OpenGL 4.5)
+```
 
 ### 登录模式浏览器配置
 
 ```python
+fingerprint = generate_fingerprint()
 browser = p.chromium.launch(
     headless=headless,
     args=[
-        '--disable-blink-features=AutomationControlled',  # 隐藏自动化标识
-        '--no-sandbox',                                    # 禁用沙箱（提高兼容性）
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
     ],
-    proxy=proxy_settings,  # 可选代理
+    proxy=proxy_settings,
 )
-page = browser.new_page()
+context = browser.new_context(
+    viewport=fingerprint['viewport'],
+    user_agent=fingerprint['user_agent'],
+    locale=fingerprint['locale'],
+    timezone_id=fingerprint['timezone_id'],
+)
+page = context.new_page()
 ```
 
 **特点：**
 - 简化配置，启动速度快
+- 随机指纹，降低关联检测风险
 - 每次启动都是全新浏览器，无历史数据
-- 无 Cookie、无缓存、无登录状态
 - 适合已注册账号的登录验证
 
 ### 注册模式浏览器配置
 
 ```python
+fingerprint = generate_fingerprint()
 browser = p.chromium.launch(
     headless=headless,
     args=[
-        '--disable-blink-features=AutomationControlled',  # 隐藏自动化标识
+        '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
-        '--disable-dev-shm-usage',                        # 避免共享内存问题
-        '--disable-infobars',                             # 禁用信息栏
-        '--window-size=1920,1080',
+        '--disable-dev-shm-usage',
+        '--disable-infobars',
+        f'--window-size={fingerprint["viewport"]["width"]},{fingerprint["viewport"]["height"]}',
         '--start-maximized',
     ]
 )
-
 context = browser.new_context(
-    locale='zh-CN',
-    timezone_id='Asia/Shanghai',
+    viewport=fingerprint['viewport'],
+    user_agent=fingerprint['user_agent'],
+    locale=fingerprint['locale'],
+    timezone_id=fingerprint['timezone_id'],
     proxy=proxy_settings,
 )
 page = context.new_page()
 ```
 
-**反检测脚本注入：**
+**反检测脚本注入（随机 WebGL）：**
 
 ```javascript
 // 1. 隐藏 webdriver 属性
@@ -257,15 +294,15 @@ window.navigator.permissions.query = (parameters) => (
         originalQuery(parameters)
 );
 
-// 4. 伪造 WebGL 信息（关键！）
+// 4. 伪造 WebGL 信息（随机值）
 const getParameterProxyHandler = {
     apply: function(target, thisArg, args) {
         const param = args[0];
         if (param === 37445) {  // UNMASKED_VENDOR_WEBGL
-            return 'Google Inc. (Apple)';
+            return '{webgl_vendor}';  // 随机：Google Inc. (Apple) / (NVIDIA) / (Intel)
         }
         if (param === 37446) {  // UNMASKED_RENDERER_WEBGL
-            return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
+            return '{webgl_renderer}';  // 随机：M1/M2/RTX 3060/Iris Xe 等
         }
         return Reflect.apply(target, thisArg, args);
     }
@@ -274,8 +311,8 @@ const getParameterProxyHandler = {
 
 **特点：**
 - 完整的反检测配置，降低被识别为自动化的风险
-- 伪造 WebGL 渲染器信息（Binance 会检测）
-- 固定 User-Agent 和视口大小
+- 随机伪造 WebGL 渲染器信息（Binance 会检测）
+- 随机 User-Agent、时区、语言
 - 适合新账号注册
 
 ### 缓存预热模式（warmup_cache）

@@ -5,18 +5,30 @@ import time
 
 
 def get_initial_mail_count(imap_host, imap_port, email_addr, email_password):
-    try:
-        mail = imaplib.IMAP4_SSL(imap_host, imap_port)
-        mail.login(email_addr, email_password)
-        mail.select("INBOX")
-        _, messages = mail.search(None, "ALL")
-        count = len(messages[0].split()) if messages[0] else 0
-        mail.logout()
-        print(f"当前邮件数量: {count}")
-        return count
-    except Exception as e:
-        print(f"获取邮件数量失败: {e}")
-        return 0
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            mail = imaplib.IMAP4_SSL(imap_host, imap_port)
+            mail.login(email_addr, email_password)
+            mail.select("INBOX")
+            _, messages = mail.search(None, "ALL")
+            count = len(messages[0].split()) if messages[0] else 0
+            mail.logout()
+            print(f"当前邮件数量: {count}")
+            return count
+        except Exception as e:
+            error_str = str(e)
+            print(f"获取邮件数量失败: {e}")
+            # 检测认证失败
+            if b"AUTHENTICATIONFAILED" in getattr(e, 'args', (b'',))[0] if isinstance(getattr(e, 'args', (None,))[0], bytes) else "AUTHENTICATIONFAILED" in error_str:
+                print(f"IMAP 认证失败 ({attempt + 1}/{max_retries})")
+                if attempt >= max_retries - 1:
+                    print(f"IMAP 认证连续失败 {max_retries} 次，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+                    return "imap_auth_failed"
+                time.sleep(1)
+                continue
+            return 0
+    return 0
 
 
 def _extract_code_from_message(msg):
@@ -90,12 +102,16 @@ def get_email_verification_code(
     print(f"等待新邮件 (初始邮件数: {initial_count})...")
     consumed_codes = consumed_codes if consumed_codes is not None else set()
 
+    auth_fail_count = 0
+    max_auth_fails = 5
+
     start_time = time.time()
     while time.time() - start_time < timeout:
         mail = None
         try:
             mail = imaplib.IMAP4_SSL(imap_host, imap_port)
             mail.login(username, password)
+            auth_fail_count = 0  # 登录成功，重置计数
             mail.select("INBOX")
 
             _, messages = mail.search(None, "ALL")
@@ -128,7 +144,15 @@ def get_email_verification_code(
                         print(f"找到验证码: {code}")
                         return code
         except Exception as e:
+            error_str = str(e)
             print(f"IMAP 错误: {e}")
+            # 检测认证失败
+            if b"AUTHENTICATIONFAILED" in getattr(e, 'args', (b'',))[0] if isinstance(getattr(e, 'args', (None,))[0], bytes) else "AUTHENTICATIONFAILED" in error_str:
+                auth_fail_count += 1
+                print(f"IMAP 认证失败 ({auth_fail_count}/{max_auth_fails})")
+                if auth_fail_count >= max_auth_fails:
+                    print(f"IMAP 认证连续失败 {max_auth_fails} 次，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+                    return "imap_auth_failed"
         finally:
             if mail:
                 try:
@@ -322,6 +346,8 @@ def handle_email_verification(
         initial_count=initial_count,
         consumed_codes=consumed_codes,
     )
+    if email_code == "imap_auth_failed":
+        return "imap_auth_failed"
     if not email_code:
         print("未能获取邮件验证码")
         # 检查是否因为 URL 跳转导致

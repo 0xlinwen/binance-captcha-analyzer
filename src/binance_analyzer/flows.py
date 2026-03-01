@@ -459,6 +459,10 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
         return False
 
     initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
+    if initial_mail_count == "imap_auth_failed":
+        logger.info("IMAP 认证失败，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+        save_failure_log(logger, email_addr)
+        return "imap_auth_failed"
     consumed_codes = set()
     mfa_retry_count = 0
     last_stage = "login"  # 跟踪当前阶段
@@ -606,6 +610,11 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     consumed_codes=consumed_codes,
                     expected_url_pattern="/login/mfa",
                 )
+                # 处理 IMAP 认证失败
+                if ok == "imap_auth_failed":
+                    logger.info("IMAP 认证失败，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+                    save_failure_log(logger, email_addr)
+                    return "imap_auth_failed"
                 # 处理 URL 跳转的情况
                 if ok == "url_changed":
                     logger.info("邮件验证期间检测到 URL 跳转，继续状态机")
@@ -675,6 +684,10 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
 
             try:
                 initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
+                if initial_mail_count == "imap_auth_failed":
+                    logger.info("IMAP 认证失败，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+                    save_failure_log(logger, email_addr)
+                    return "imap_auth_failed"
                 logger.info(f"获取初始邮件数: {initial_mail_count}")
             except Exception as e:
                 logger.info(f"获取初始邮件数失败: {e}")
@@ -951,6 +964,10 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
         logger.info(f"页面行为模拟异常: {e}")
 
     initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
+    if initial_mail_count == "imap_auth_failed":
+        logger.info("IMAP 认证失败，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+        save_failure_log(logger, email_addr)
+        return "imap_auth_failed"
     consumed_codes = set()
     captcha_fail_count = 0  # 验证码连续失败计数
 
@@ -1140,6 +1157,12 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 consumed_codes=consumed_codes,
                 expected_url_pattern="/register/verification",
             )
+            # 处理 IMAP 认证失败
+            if result == "imap_auth_failed":
+                logger.info("IMAP 认证失败，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+                cleanup_listeners()
+                save_failure_log(logger, email_addr)
+                return "imap_auth_failed"
             # 处理 URL 跳转的情况
             if result == "url_changed":
                 logger.info("邮件验证期间检测到 URL 跳转，继续状态机")
@@ -1187,6 +1210,10 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
 
             page.wait_for_timeout(random.randint(400, 600))
             initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
+            if initial_mail_count == "imap_auth_failed":
+                logger.info("IMAP 认证失败，邮箱未开启 IMAP 或密码错误，无法读取邮件")
+                save_failure_log(logger, email_addr)
+                return "imap_auth_failed"
             click_button(page, ["继续", "Continue", "下一步", "Next"])
 
             # 等待URL变化（最多等待5秒）
