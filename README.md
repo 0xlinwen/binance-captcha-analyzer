@@ -28,8 +28,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 │               orchestrator.py (编排器)                    │
 │     浏览器启动 / 缓存管理 / Cookie提取 / 反检测注入        │
 │                                                         │
-│  登录模式:  简化浏览器配置                                │
-│  注册模式:  完整反检测配置 + WebGL 伪造                   │
+│  登录/注册模式:  完整反检测配置 + WebGL 伪造              │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -73,6 +72,7 @@ src/binance_analyzer/
   web_actions.py                       # 页面交互（输入邮箱/密码、点击按钮、弹窗处理）
   captcha_solver.py                    # 验证码执行（滑块拖动、点击图片、重试策略）
   captcha_ai.py                        # OpenRouter AI 调用与 JSON 解析
+  prompts.py                            # AI 验证码识别提示词模板
   email_imap.py                        # IMAP 邮件验证码提取 + Outlook API 拉码
   storage.py                           # 账号文件读取、结果写入（文件锁）
   local_cache.py                       # 应用层静态资源缓存
@@ -199,13 +199,13 @@ python main.py --refresh-cache
 
 | 特性 | 登录模式 | 注册模式 |
 |------|----------|----------|
-| 浏览器启动 | `chromium.launch()` 简化配置 | `chromium.launch()` 完整反检测 |
-| 反检测脚本 | 无 | 完整 11 项伪造 |
+| 浏览器启动 | `chromium.launch()` + `new_context()` | `chromium.launch()` + `new_context()` |
+| 反检测脚本 | 完整 11 项伪造 | 完整 11 项伪造 |
 | User-Agent | 随机 Chrome 138-145 | 随机 Chrome 138-145 |
 | 视口大小 | 随机（基于指纹配置） | 随机（基于指纹配置） |
 | 时区/语言 | 随机 | 随机 |
-| WebGL 伪造 | 无 | 随机 Mac Apple Silicon 显卡 |
-| 屏幕/硬件伪造 | 无 | 完整伪造 |
+| WebGL 伪造 | 随机 Mac Apple Silicon 显卡 | 随机 Mac Apple Silicon 显卡 |
+| 屏幕/硬件伪造 | 完整伪造 | 完整伪造 |
 
 ### 指纹随机化
 
@@ -234,9 +234,9 @@ FINGERPRINT_PROFILES = [
 [Worker-0] 指纹: UA=...Chrome/142.0.0.0 Safari/537.36 | TZ=Asia/Hong_Kong | Screen=1512x982 | DPR=2
 ```
 
-### 注册模式反检测脚本（11 项）
+### 反检测脚本（11 项）
 
-注册模式注入完整的反检测初始化脚本：
+登录和注册模式均注入完整的反检测初始化脚本：
 
 | # | 伪造项 | 说明 |
 |---|--------|------|
@@ -247,8 +247,8 @@ FINGERPRINT_PROFILES = [
 | 5 | 屏幕信息 | width/height/availWidth/availHeight/colorDepth/pixelDepth/DPR |
 | 6 | `window.chrome` | 完整伪造 runtime/loadTimes/csi/app |
 | 7 | Permissions API | 修复 notifications 状态查询 |
-| 8 | WebGL | 完整伪造 vendor/renderer（含 OffscreenCanvas） |
-| 9 | Plugin 列表 | Playwright 默认已提供 |
+| 8 | WebGL | 完整伪造 vendor/renderer（含 OffscreenCanvas + Worker） |
+| 9 | Canvas 噪声 | frame-aware seed 扰动（toDataURL/toBlob/getImageData） |
 | 10 | 媒体设备 | 伪造摄像头/麦克风/扬声器 |
 | 11 | Automation 属性 | 删除 cdc_ 前缀变量 |
 
@@ -410,7 +410,7 @@ time.sleep(random.uniform(0.01, 0.03))
 
 | 特性 | `cache.enabled: true` | `cache.enabled: false` |
 |------|----------------------|------------------------|
-| 浏览器启动 | `launch_persistent_context` | `launch` (普通模式) |
+| 浏览器启动 | `launch` + `new_context` | `launch` + `new_context` |
 | 请求拦截 | `page.route("**/*")` | 无 |
 | 静态资源缓存 | `route.fulfill()` 本地返回 | 无 |
 
@@ -452,6 +452,14 @@ IP 被风控，解决方案：
 - 降低并发数（`max_workers: 1-2`）
 - 使用高质量独立代理
 - 关闭缓存模式（`cache.enabled: false`）排除缓存干扰
+
+### CloudFront 403 / IP 地区限制
+
+以下情况会被识别为 IP 级别拦截，直接失败关闭窗口，不重试：
+- CloudFront 403 ERROR（CDN 层拦截）
+- "无法为该地区的用户提供服务"（IP 被识别为美国等受限地区，错误码 200004431）
+
+解决方案：更换代理 IP 到非受限地区。
 
 ### 验证码识别失败
 
