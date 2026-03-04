@@ -2,36 +2,239 @@ import email
 import imaplib
 import re
 import time
+import logging
+from html.parser import HTMLParser
+from contextlib import contextmanager
+
+import requests
+
+from .constants import (
+    IMAP_RETRY_COUNT,
+    IMAP_CONNECTION_TIMEOUT_SEC,
+    IMAP_FETCH_TIMEOUT_SEC,
+)
+from .utils import retry_with_backoff
+from .exceptions import (
+    IMAPAuthFailed,
+    IMAPConnectionError,
+    IMAPTimeout,
+    EmailCodeNotFound,
+)
+
+logger = logging.getLogger(__name__)
+OUTLOOK_MAIL_API_URL = "https://api.bujidian.com/getMailInfo"
+
+
+def _is_outlook_address(email_addr: str) -> bool:
+    return str(email_addr).strip().lower().endswith("@outlook.com")
+
+
+def _strip_html(text: str) -> str:
+    """HTML 转纯文本"""
+    class _Parser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+
+        def handle_data(self, data):
+            self.parts.append(data)
+
+    parser = _Parser()
+    parser.feed(text)
+    return "".join(parser.parts)
+
+
+def _extract_6digit_code(text: str) -> str | None:
+    """
+    从文本中提取 6 位验证码。
+    修复：
+    1. \b 在中文字符后不工作，改用 (?<!\d)...(?!\d) lookaround
+    2. 过滤时间戳格式（HH:MM:SS / YYYY-MM-DD）中误匹配的数字
+    3. 优先匹配"验证码/驗證碼"附近的数字，再兜底匹配独立 6 位数
+    """
+    if not text:
+        return None
+
+    # 优先：验证码关键词后的数字（简体+繁体+英文）
+    keyword_patterns = [
+        r'[验驗][证證][码碼][：:\s]*(\d{4,8})',
+        r'[激][活][码碼][：:\s]*(\d{4,8})',
+        r'[Cc]ode[：:\s]*(\d{4,8})',
+        r'[Vv]erification[：:\s]*(\d{4,8})',
+        r'[Cc]onfirmation[：:\s]*(\d{4,8})',
+        r'OTP[：:\s]*(\d{4,8})',
+        # 繁体"您的驗證碼"后紧跟数字（无分隔符）
+        r'[验驗][证證][码碼](\d{4,8})',
+    ]
+    for pattern in keyword_patterns:
+        m = re.search(pattern, text)
+        if m:
+            return m.group(1)
+
+    # 兜底：独立的 6 位数字
+    # 排除时间戳（如 06:39:39 / 2026-03-04）
+    # 先把时间戳替换掉再匹配
+    clean = re.sub(r'\d{4}-\d{2}-\d{2}', '', text)          # 日期
+    clean = re.sub(r'\d{1,2}:\d{2}:\d{2}', '', clean)        # 时间
+    clean = re.sub(r'\d{4}/\d{2}/\d{2}', '', clean)          # 斜线日期
+    # (?<!\d)(\d{6})(?!\d) 代替 \b，兼容中文前缀
+    m = re.search(r'(?<!\d)(\d{6})(?!\d)', clean)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def _extract_code_from_api_text(text: str) -> str | None:
+    """从 API 返回的 subject 或 content（可能含 HTML）中提取验证码"""
+    if not text:
+        return None
+
+    # 如果包含 HTML，先剥离
+    if "<" in text and ">" in text:
+        text = _strip_html(text)
+
+    return _extract_6digit_code(text)
+
+
+def _fetch_outlook_code_via_api(email_addr: str, email_password: str, timeout=60, poll_interval=5):
+    """使用外部 API 拉取 outlook 邮箱验证码。"""
+    PERMANENT_FAIL_KEYWORDS = [
+        "邮箱信息不存在",
+        "邮箱密码错误",
+        "账号不存在",
+        "account not found",
+        "invalid credentials",
+    ]
+
+    start_time = time.time()
+    permanent_fail_count = 0
+    max_permanent_fails = 3
+
+    while time.time() - start_time < timeout:
+        print(f"[{email_addr}] 请求邮件 ...")
+        try:
+            resp = requests.get(
+                OUTLOOK_MAIL_API_URL,
+                params={"name": email_addr, "pwd": email_password},
+                timeout=15,
+            )
+            data = resp.json()
+        except Exception as e:
+            print(f"[{email_addr}] 请求失败: {e}")
+            logger.warning(f"[{email_addr}] Outlook API 请求失败: {e}")
+            time.sleep(poll_interval)
+            continue
+
+        if data.get("status") != 1:
+            msg = data.get("message", "") or ""
+            print(f"[{email_addr}] API 返回失败: {msg}")
+            logger.info(f"[{email_addr}] Outlook API 返回失败: {msg}")
+
+            if any(kw in msg for kw in PERMANENT_FAIL_KEYWORDS):
+                permanent_fail_count += 1
+                if permanent_fail_count >= max_permanent_fails:
+                    print(f"[{email_addr}] 邮箱认证失败（连续 {permanent_fail_count} 次），停止重试")
+                    logger.error(f"[{email_addr}] Outlook API 永久性错误，停止: {msg}")
+                    return "imap_auth_failed"
+            else:
+                permanent_fail_count = 0
+
+            time.sleep(poll_interval)
+            continue
+
+        msg_obj = data.get("message", {}) or {}
+        subject = msg_obj.get("subject", "") or ""
+        content = msg_obj.get("content", "") or ""
+        send_time = msg_obj.get("send_time_utc", "") or ""
+        print(f"[{email_addr}] 收到邮件: {subject} ({send_time})")
+        logger.info(f"[{email_addr}] Outlook API 收到邮件: subject={subject!r}")
+
+        # 优先从 subject 提取，再从 content 提取
+        code = _extract_code_from_api_text(subject)
+        if not code:
+            code = _extract_code_from_api_text(content)
+
+        if code:
+            print(f"[{email_addr}] 找到验证码: {code}")
+            logger.info(f"[{email_addr}] Outlook API 找到验证码: {code}")
+            return code
+
+        print(f"[{email_addr}] 未匹配到验证码，{poll_interval}秒后重试...")
+        logger.debug(f"[{email_addr}] subject={subject!r}, content前200字符={_strip_html(content)[:200]!r}")
+        time.sleep(poll_interval)
+
+    print(f"[{email_addr}] 超时未获取到验证码")
+    logger.warning(f"[{email_addr}] Outlook API 获取验证码超时")
+    return None
+
+
+@contextmanager
+def imap_connection(imap_host, imap_port, email_addr, email_password):
+    """
+    IMAP 连接上下文管理器，确保连接正确关闭
+
+    Raises:
+        IMAPAuthFailed: 认证失败
+        IMAPConnectionError: 连接失败
+    """
+    mail = None
+    try:
+        mail = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=IMAP_CONNECTION_TIMEOUT_SEC)
+        mail.login(email_addr, email_password)
+        yield mail
+    except imaplib.IMAP4.error as e:
+        error_str = str(e)
+        if "AUTHENTICATIONFAILED" in error_str.upper():
+            raise IMAPAuthFailed(f"IMAP 认证失败: {e}") from e
+        else:
+            raise IMAPConnectionError(f"IMAP 连接错误: {e}") from e
+    except Exception as e:
+        raise IMAPConnectionError(f"IMAP 连接失败: {e}") from e
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
 
 
 def get_initial_mail_count(imap_host, imap_port, email_addr, email_password):
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            mail = imaplib.IMAP4_SSL(imap_host, imap_port)
-            mail.login(email_addr, email_password)
+    """
+    获取邮箱初始邮件数量
+
+    Returns:
+        邮件数量，失败返回 0 或 "imap_auth_failed"
+    """
+    if _is_outlook_address(email_addr):
+        logger.info(f"[{email_addr}] Outlook 邮箱使用 API 拉码，跳过 IMAP 初始计数")
+        return 0
+
+    def _get_count():
+        with imap_connection(imap_host, imap_port, email_addr, email_password) as mail:
             mail.select("INBOX")
             _, messages = mail.search(None, "ALL")
             count = len(messages[0].split()) if messages[0] else 0
-            mail.logout()
-            print(f"当前邮件数量: {count}")
+            logger.info(f"当前邮件数量: {count}")
             return count
-        except Exception as e:
-            error_str = str(e)
-            print(f"获取邮件数量失败: {e}")
-            # 检测认证失败
-            if b"AUTHENTICATIONFAILED" in getattr(e, 'args', (b'',))[0] if isinstance(getattr(e, 'args', (None,))[0], bytes) else "AUTHENTICATIONFAILED" in error_str:
-                print(f"IMAP 认证失败 ({attempt + 1}/{max_retries})")
-                if attempt >= max_retries - 1:
-                    print(f"IMAP 认证连续失败 {max_retries} 次，邮箱未开启 IMAP 或密码错误，无法读取邮件")
-                    return "imap_auth_failed"
-                time.sleep(1)
-                continue
-            return 0
-    return 0
+
+    try:
+        return retry_with_backoff(
+            _get_count,
+            max_retries=IMAP_RETRY_COUNT,
+            logger=logger,
+            operation_name="获取邮件数量"
+        )
+    except IMAPAuthFailed as e:
+        logger.error(f"IMAP 认证失败: {e}")
+        return "imap_auth_failed"
+    except Exception as e:
+        logger.error(f"获取邮件数量失败: {e}")
+        return 0
 
 
 def _extract_code_from_message(msg):
+    """从 IMAP 邮件对象中提取验证码"""
     body = ""
     html_body = ""
 
@@ -63,29 +266,38 @@ def _extract_code_from_message(msg):
         except Exception:
             pass
 
-    content = body
-    if not content and html_body:
-        verification_section = re.search(r'(验证码|激活码|code)[^>]*>[\s\S]{0,200}?>(\d{6})<', html_body, re.IGNORECASE)
-        if verification_section:
-            return verification_section.group(2)
-        content = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', html_body, flags=re.IGNORECASE)
-        content = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', content, flags=re.IGNORECASE)
-        content = re.sub(r'<[^>]+>', ' ', content)
-        content = re.sub(r'&nbsp;', ' ', content)
-        content = re.sub(r'\s+', ' ', content)
+    # 优先用纯文本
+    if body.strip():
+        code = _extract_6digit_code(body)
+        if code:
+            return code
 
-    patterns = [
-        r'账户验证码[：:\s]*(\d{6})',
-        r'验证码[：:\s]*(\d{6})',
-        r'激活码[：:\s]*(\d{6})',
-        r'\b(\d{6})\b',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            code = match.group(1)
-            if code != "000000":
-                return code
+    # 再处理 HTML
+    if html_body:
+        # 先尝试直接在 HTML 中用正则找验证码（避免 strip 后上下文丢失）
+        # 繁体/简体"您的验证码"后面紧跟 <strong>XXXXXX
+        html_patterns = [
+            r'[验驗][证證][码碼][^>]*>[\s\S]{0,300}?<[^>]+>\s*(\d{4,8})\s*<',
+            r'<strong[^>]*>\s*(\d{6})\s*</strong>',
+            r'color:#f0b90b[^>]*>\s*<strong>\s*(\d{6})\s*</strong>',
+        ]
+        for pattern in html_patterns:
+            m = re.search(pattern, html_body, re.IGNORECASE)
+            if m:
+                code = m.group(1)
+                if code != "000000":
+                    return code
+
+        # 剥离 HTML 后再提取
+        clean = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', html_body, flags=re.IGNORECASE)
+        clean = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'<[^>]+>', ' ', clean)
+        clean = re.sub(r'&nbsp;', ' ', clean)
+        clean = re.sub(r'\s+', ' ', clean)
+        code = _extract_6digit_code(clean)
+        if code:
+            return code
+
     return None
 
 
@@ -94,75 +306,79 @@ def get_email_verification_code(
     imap_port,
     username,
     password,
-    timeout=90,
+    timeout=IMAP_FETCH_TIMEOUT_SEC,
     initial_count=0,
     consumed_codes=None,
 ):
-    print(f"连接 IMAP: {imap_host}:{imap_port}, 用户: {username}")
-    print(f"等待新邮件 (初始邮件数: {initial_count})...")
+    """
+    获取邮件验证码
+
+    Returns:
+        验证码字符串，失败返回 None 或 "imap_auth_failed"
+    """
+    if _is_outlook_address(username):
+        logger.info(f"[{username}] 使用 Outlook API 获取验证码")
+        return _fetch_outlook_code_via_api(username, password, timeout=timeout, poll_interval=5)
+
+    logger.info(f"连接 IMAP: {imap_host}:{imap_port}, 用户: {username}")
+    logger.info(f"等待新邮件 (初始邮件数: {initial_count})...")
     consumed_codes = consumed_codes if consumed_codes is not None else set()
 
     auth_fail_count = 0
-    max_auth_fails = 5
+    max_auth_fails = IMAP_RETRY_COUNT
 
     start_time = time.time()
     while time.time() - start_time < timeout:
-        mail = None
         try:
-            mail = imaplib.IMAP4_SSL(imap_host, imap_port)
-            mail.login(username, password)
-            auth_fail_count = 0  # 登录成功，重置计数
-            mail.select("INBOX")
+            with imap_connection(imap_host, imap_port, username, password) as mail:
+                auth_fail_count = 0
+                mail.select("INBOX")
 
-            _, messages = mail.search(None, "ALL")
-            if not messages[0]:
-                time.sleep(3)
-                continue
+                _, messages = mail.search(None, "ALL")
+                if not messages[0]:
+                    time.sleep(3)
+                    continue
 
-            mail_ids = messages[0].split()
-            current_count = len(mail_ids)
-            if current_count <= initial_count:
-                print(f"等待新邮件... (当前: {current_count})")
-                time.sleep(3)
-                continue
+                mail_ids = messages[0].split()
+                current_count = len(mail_ids)
+                if current_count <= initial_count:
+                    logger.info(f"等待新邮件... (当前: {current_count})")
+                    time.sleep(3)
+                    continue
 
-            # 只检查最近 20 封，降低并发下误取老邮件概率
-            recent_mail_ids = mail_ids[-20:]
-            for mail_id in reversed(recent_mail_ids):
-                _, msg_data = mail.fetch(mail_id, "(RFC822)")
-                for response_part in msg_data:
-                    if not isinstance(response_part, tuple):
-                        continue
-                    msg = email.message_from_bytes(response_part[1])
-                    from_addr = msg.get("From", "").lower()
-                    if "binance" not in from_addr:
-                        continue
+                recent_mail_ids = mail_ids[-20:]
+                for mail_id in reversed(recent_mail_ids):
+                    _, msg_data = mail.fetch(mail_id, "(RFC822)")
+                    for response_part in msg_data:
+                        if not isinstance(response_part, tuple):
+                            continue
+                        msg = email.message_from_bytes(response_part[1])
+                        from_addr = msg.get("From", "").lower()
+                        if "binance" not in from_addr:
+                            continue
 
-                    code = _extract_code_from_message(msg)
-                    if code and code not in consumed_codes:
-                        consumed_codes.add(code)
-                        print(f"找到验证码: {code}")
-                        return code
+                        code = _extract_code_from_message(msg)
+                        if code and code not in consumed_codes:
+                            consumed_codes.add(code)
+                            logger.info(f"找到验证码: {code}")
+                            return code
+
+        except IMAPAuthFailed as e:
+            auth_fail_count += 1
+            logger.warning(f"IMAP 认证失败 ({auth_fail_count}/{max_auth_fails}): {e}")
+            if auth_fail_count >= max_auth_fails:
+                logger.error(f"IMAP 认证连续失败 {max_auth_fails} 次，邮箱未开启 IMAP 或密码错误")
+                return "imap_auth_failed"
+            time.sleep(1)
+            continue
+
         except Exception as e:
-            error_str = str(e)
-            print(f"IMAP 错误: {e}")
-            # 检测认证失败
-            if b"AUTHENTICATIONFAILED" in getattr(e, 'args', (b'',))[0] if isinstance(getattr(e, 'args', (None,))[0], bytes) else "AUTHENTICATIONFAILED" in error_str:
-                auth_fail_count += 1
-                print(f"IMAP 认证失败 ({auth_fail_count}/{max_auth_fails})")
-                if auth_fail_count >= max_auth_fails:
-                    print(f"IMAP 认证连续失败 {max_auth_fails} 次，邮箱未开启 IMAP 或密码错误，无法读取邮件")
-                    return "imap_auth_failed"
-        finally:
-            if mail:
-                try:
-                    mail.logout()
-                except Exception:
-                    pass
+            logger.error(f"IMAP 错误: {e}")
+            time.sleep(3)
 
         time.sleep(3)
 
-    print("获取邮件验证码超时")
+    logger.warning("获取邮件验证码超时")
     return None
 
 
@@ -177,36 +393,27 @@ def handle_email_verification(
     consumed_codes=None,
     expected_url_pattern=None,
 ):
-    # 等待页面加载完成
     page.wait_for_timeout(2000)
-
-    # 记录初始 URL，用于检测页面跳转
     initial_url = page.url
 
     def _check_url_redirect():
-        """检查页面是否跳转到其他页面（如登录页）"""
         try:
             current_url = page.url
-            # 如果指定了期望的 URL 模式，检查是否匹配
             if expected_url_pattern and expected_url_pattern not in current_url:
-                print(f"[URL变化] 页面已跳转: {current_url}")
+                logger.info(f"[URL变化] 页面已跳转: {current_url}")
                 return True
-            # 如果跳转到登录首页（非 mfa/password 子页面），说明验证失败
             if "/login" in current_url and "/login/mfa" not in current_url and "/login/password" not in current_url:
                 if "/login/mfa" in initial_url or "/register/verification" in initial_url:
-                    print(f"[URL变化] 从验证页跳转回登录页: {current_url}")
+                    logger.info(f"[URL变化] 从验证页跳转回登录页: {current_url}")
                     return True
         except Exception:
             pass
         return False
 
     def _dismiss_auth_error_popup():
-        """检测并关闭认证失败弹窗"""
         try:
-            # 检测页面是否有"认证失败"文字
             body_text = page.inner_text("body")
             if "认证失败" in body_text:
-                # 尝试点击弹窗按钮（知道了 优先）
                 popup_buttons = [
                     "button:has-text('知道了')",
                     "button:has-text('确定')",
@@ -218,7 +425,7 @@ def handle_email_verification(
                         btn = page.query_selector(selector)
                         if btn and btn.is_visible():
                             btn.click()
-                            print("关闭了认证失败弹窗")
+                            logger.info("关闭了认证失败弹窗")
                             page.wait_for_timeout(1000)
                             return True
                     except Exception:
@@ -228,14 +435,11 @@ def handle_email_verification(
         return False
 
     def _click_get_code_button():
-        """检测并点击获取验证码按钮"""
         try:
-            # 检查是否已有"验证码已发送"提示
             body_text = page.inner_text("body")
             if "验证码已发送" in body_text or "已发送" in body_text:
-                return False  # 已发送，不需要点击
+                return False
 
-            # 尝试点击获取验证码按钮
             get_code_buttons = [
                 "button:has-text('获取验证码')",
                 "button:has-text('发送验证码')",
@@ -251,7 +455,7 @@ def handle_email_verification(
                     btn = page.query_selector(selector)
                     if btn and btn.is_visible():
                         btn.click()
-                        print("点击了获取验证码按钮")
+                        logger.info("点击了获取验证码按钮")
                         page.wait_for_timeout(2000)
                         return True
                 except Exception:
@@ -280,8 +484,6 @@ def handle_email_verification(
     ]
 
     def _find_code_input():
-        """在主页面和 iframe 中查找验证码输入框"""
-        # 先在主页面查找
         for selector in code_input_selectors:
             try:
                 el = page.query_selector(selector)
@@ -290,7 +492,6 @@ def handle_email_verification(
             except Exception:
                 pass
 
-        # 在 iframe 中查找
         try:
             frames = page.frames
             for frame in frames:
@@ -300,7 +501,7 @@ def handle_email_verification(
                     try:
                         el = frame.query_selector(selector)
                         if el and el.is_visible():
-                            print(f"在 iframe 中找到验证码输入框: {frame.url}")
+                            logger.info(f"在 iframe 中找到验证码输入框: {frame.url}")
                             return el, frame
                     except Exception:
                         pass
@@ -310,29 +511,24 @@ def handle_email_verification(
         return None, None
 
     code_input = None
-    # 尝试多次查找，等待元素出现
     for retry in range(10):
-        # 检测 URL 是否跳转
         if _check_url_redirect():
-            print("检测到页面跳转，退出邮件验证流程")
+            logger.info("检测到页面跳转，退出邮件验证流程")
             return "url_changed"
 
-        # 检测并关闭认证失败弹窗
         _dismiss_auth_error_popup()
 
-        # 检测是否需要点击获取验证码按钮
         if retry == 0:
             _click_get_code_button()
 
         code_input, _ = _find_code_input()
         if code_input:
-            print(f"找到验证码输入框")
+            logger.info("找到验证码输入框")
             break
-        print(f"等待验证码输入框出现... ({retry + 1}/10)")
+        logger.info(f"等待验证码输入框出现... ({retry + 1}/10)")
         page.wait_for_timeout(1500)
 
     if not code_input:
-        # 最后再检查一次 URL
         if _check_url_redirect():
             return "url_changed"
         return False
@@ -349,18 +545,15 @@ def handle_email_verification(
     if email_code == "imap_auth_failed":
         return "imap_auth_failed"
     if not email_code:
-        print("未能获取邮件验证码")
-        # 检查是否因为 URL 跳转导致
+        logger.warning("未能获取邮件验证码")
         if _check_url_redirect():
             return "url_changed"
         return False
 
-    # 重新查找输入框（等待邮件期间页面可能刷新）
     code_input = None
     for retry in range(3):
-        # 检测 URL 是否跳转
         if _check_url_redirect():
-            print("等待邮件期间页面跳转，退出邮件验证流程")
+            logger.info("等待邮件期间页面跳转，退出邮件验证流程")
             return "url_changed"
         code_input, _ = _find_code_input()
         if code_input:
@@ -368,28 +561,26 @@ def handle_email_verification(
         page.wait_for_timeout(500)
 
     if not code_input:
-        print("填充验证码时未找到输入框")
+        logger.warning("填充验证码时未找到输入框")
         if _check_url_redirect():
             return "url_changed"
         return False
 
-    print(f"输入验证码: {email_code}")
+    logger.info(f"输入验证码: {email_code}")
     code_input.fill(email_code)
     page.wait_for_timeout(900)
 
     if not _submit_mfa(page):
         for _ in range(max(1, mfa_submit_retry)):
             page.wait_for_timeout(500)
-            # 检测认证失败弹窗
             _dismiss_auth_error_popup()
             if _submit_mfa(page):
                 return True
         return False
 
-    # 提交后检测认证失败弹窗
     page.wait_for_timeout(1000)
     if _dismiss_auth_error_popup():
-        return False  # 认证失败，返回 False 让上层重试
+        return False
 
     return True
 
@@ -410,15 +601,15 @@ def _submit_mfa(page):
             btn = page.query_selector(selector)
             if btn and btn.is_visible():
                 btn.click()
-                print(f"点击了按钮: {selector}")
+                logger.info(f"点击了按钮: {selector}")
                 return True
         except Exception:
             pass
 
     try:
         page.keyboard.press("Enter")
-        print("未找到提交按钮，尝试按回车...")
+        logger.info("未找到提交按钮，尝试按回车...")
         return True
     except Exception as e:
-        print(f"提交 MFA 失败: {e}")
+        logger.error(f"提交 MFA 失败: {e}")
         return False

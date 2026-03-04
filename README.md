@@ -6,11 +6,13 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 
 - 自动登录/注册 Binance 账号
 - AI 识别滑块验证码和点击验证码（通过 OpenRouter API）
-- IMAP 自动提取邮箱 MFA 验证码
+- IMAP 自动提取邮箱 MFA 验证码（支持 Outlook API 拉码）
 - 多进程并发处理多个账号
 - 本地静态资源缓存（减少网络流量）
-- 流量监控统计
+- 浏览器指纹随机化（Mac Apple Silicon 配置池）
+- 完整反检测脚本注入（WebGL/屏幕/硬件/媒体设备伪造）
 - 自动提取 Cookie 和 CSRF Token
+- 成功/失败账号分类日志
 
 ## 整体架构
 
@@ -24,7 +26,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │               orchestrator.py (编排器)                    │
-│     浏览器启动 / 缓存管理 / Cookie提取 / 流量监控          │
+│     浏览器启动 / 缓存管理 / Cookie提取 / 反检测注入        │
 │                                                         │
 │  登录模式:  简化浏览器配置                                │
 │  注册模式:  完整反检测配置 + WebGL 伪造                   │
@@ -46,8 +48,8 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
 │ web_actions  │  │captcha_solver│  │   email_imap     │
 │ 页面交互动作  │  │ 验证码执行    │  │ IMAP邮件验证码    │
-│ 输入/点击/   │  │ 滑块/点击    │  │ 提取/填充/提交    │
-│ 跳转/弹窗    │  │ 重试/冷却    │  │                  │
+│ 输入/点击/   │  │ 滑块/点击    │  │ Outlook API拉码  │
+│ 跳转/弹窗    │  │ 重试/冷却    │  │ 提取/填充/提交    │
 └──────────────┘  └──────┬───────┘  └──────────────────┘
                          │
                          ▼
@@ -61,7 +63,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 ## 项目结构
 
 ```
-captcha_analyzer.py                    # 兼容入口
+main.py                                # 兼容入口
 src/binance_analyzer/
   __init__.py
   cli.py                               # 主入口、并发调度、信号处理、缓存预热
@@ -71,14 +73,23 @@ src/binance_analyzer/
   web_actions.py                       # 页面交互（输入邮箱/密码、点击按钮、弹窗处理）
   captcha_solver.py                    # 验证码执行（滑块拖动、点击图片、重试策略）
   captcha_ai.py                        # OpenRouter AI 调用与 JSON 解析
-  email_imap.py                        # IMAP 邮件验证码提取与 MFA 提交
+  email_imap.py                        # IMAP 邮件验证码提取 + Outlook API 拉码
   storage.py                           # 账号文件读取、结果写入（文件锁）
   local_cache.py                       # 应用层静态资源缓存
   traffic_monitor.py                   # 流量统计（按类型/域名/请求）
   fingerprint.py                       # 浏览器指纹随机化（UA/时区/WebGL）
+  logger.py                            # 统一日志管理（每日日志、成功/失败分类）
+  constants.py                         # 全局常量（超时、重试、日志格式等）
+  utils.py                             # 工具函数（重试策略、弹窗处理、文件名清理）
+  exceptions.py                        # 自定义异常层级（可重试/不可重试分类）
 output/
-  success_accounts.txt                 # 登录成功的账号
-  failed_accounts.txt                  # 登录失败的账号
+  success_accounts.txt                 # 成功的账号
+  failed_accounts.txt                  # 失败的账号
+  registered_accounts.json             # 成功账号的 Cookie 和 CSRF Token
+  logs/
+    binance_YYYY-MM-DD.log             # 每日主日志
+    success/YYYY-MM-DD.log             # 当日成功账号列表
+    failure/YYYY-MM-DD.log             # 当日失败账号列表
 ```
 
 ## 安装
@@ -90,9 +101,9 @@ playwright install chromium
 
 依赖：
 - `playwright` - 浏览器自动化
-- `requests` - OpenRouter API 调用
+- `requests` - OpenRouter API / Outlook 邮件 API 调用
 - `opencv-python` + `numpy` - 验证码截图调试标注
-- `scikit-image` - 图像处理
+- `psutil` - 进程管理（信号处理时终止子进程）
 
 ## 配置
 
@@ -114,6 +125,11 @@ cp config.example.json config.json
   "accounts_file": "accounts.txt",         // 账号文件路径
   "output_file": "output/registered_accounts.json",  // 输出文件路径
 
+  // === 模式 ===
+  "mode": "login",                         // 运行模式：login / register（别名：signup, sign_up）
+  "max_login_retries": 3,                  // 单账号最大重试次数
+  "debug_mode": false,                     // 调试模式
+
   // === 浏览器 ===
   "headless": false,                       // 是否无头模式
   "max_workers": 2,                        // 并发进程数
@@ -122,8 +138,6 @@ cp config.example.json config.json
   "cache": {
     "enabled": true                        // 是否启用本地静态资源缓存
   },
-  // enabled=true:  使用 persistent_context + route拦截 + 本地缓存
-  // enabled=false: 使用普通 launch 模式，无拦截，干净浏览器环境
 
   // === 代理 ===
   "proxy": {
@@ -141,8 +155,8 @@ cp config.example.json config.json
   // === 验证码 ===
   "captcha": {
     "retry_mode": "fast",                  // fast: 快速重试
-    "max_attempts_per_round": 3,           // 每轮最大尝试次数
-    "max_rounds": 2,                       // 最大轮次（每轮重新加载页面）
+    "max_attempts_per_round": 5,           // 每轮最大尝试次数（默认 5）
+    "max_rounds": 3,                       // 最大轮次（默认 3，每轮重新加载页面）
     "cooldown_on_risk_min_sec": 20,        // 风控冷却最小秒数
     "cooldown_on_risk_max_sec": 60,        // 风控冷却最大秒数
     "click_retry_per_cell": 3              // 点击验证码单格重试次数
@@ -171,10 +185,10 @@ email2@example.com:password2
 
 ```bash
 # 正常运行
-python captcha_analyzer.py
+python main.py
 
 # 刷新缓存（删除旧缓存并重新预热）
-python captcha_analyzer.py --refresh-cache
+python main.py --refresh-cache
 ```
 
 ---
@@ -183,158 +197,64 @@ python captcha_analyzer.py --refresh-cache
 
 ### 登录模式 vs 注册模式
 
-登录和注册使用不同的浏览器配置策略，均支持随机指纹：
-
 | 特性 | 登录模式 | 注册模式 |
 |------|----------|----------|
 | 浏览器启动 | `chromium.launch()` 简化配置 | `chromium.launch()` 完整反检测 |
-| 用户数据目录 | 无（每次全新浏览器） | 无（每次全新浏览器） |
-| 反检测脚本 | 无 | 完整 WebGL 伪造 |
-| User-Agent | 随机 Chrome 120-124 | 随机 Chrome 120-124 |
-| 视口大小 | 1920x1080 | 1920x1080 |
+| 反检测脚本 | 无 | 完整 11 项伪造 |
+| User-Agent | 随机 Chrome 138-145 | 随机 Chrome 138-145 |
+| 视口大小 | 随机（基于指纹配置） | 随机（基于指纹配置） |
 | 时区/语言 | 随机 | 随机 |
-| WebGL 伪造 | 无 | 随机显卡信息 |
+| WebGL 伪造 | 无 | 随机 Mac Apple Silicon 显卡 |
+| 屏幕/硬件伪造 | 无 | 完整伪造 |
 
 ### 指纹随机化
 
-每个 worker 启动时会生成随机指纹，避免多窗口被关联检测：
+每个 worker 启动时生成随机指纹，避免多窗口被关联检测：
 
 ```python
 # fingerprint.py
-CHROME_VERSIONS = ['120.0.0.0', '121.0.0.0', '122.0.0.0', '123.0.0.0', '124.0.0.0']
-TIMEZONES = ['Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Singapore', 'Asia/Tokyo', 'America/New_York', 'Europe/London']
-LOCALES = ['zh-CN', 'zh-TW', 'en-US', 'en-GB', 'ja-JP']
-WEBGL_RENDERERS = [
-    'ANGLE (Apple, Apple M1, OpenGL 4.1)',
-    'ANGLE (Apple, Apple M2, OpenGL 4.1)',
-    'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, OpenGL 4.5)',
-    'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics, OpenGL 4.1)',
-    # ...
+CHROME_VERSIONS = ['138.0.0.0', '140.0.0.0', '141.0.0.0', '142.0.0.0',
+                   '143.0.0.0', '144.0.0.0', '145.0.0.0']
+
+TIMEZONES = ['Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Singapore']
+
+LOCALES = ['zh-CN', 'en-US', 'zh-TW']
+
+# 4 种 Mac Apple Silicon 配置
+FINGERPRINT_PROFILES = [
+    'mac_m4_real'   # M4, 10核, 1470x956, DPR=2
+    'mac_m1_8core'  # M1, 8核,  1440x900, DPR=2
+    'mac_m2_8core'  # M2, 8核,  1512x982, DPR=2
+    'mac_m3_pro'    # M3 Pro, 12核, 1512x982, DPR=2
 ]
 ```
 
 启动时会打印指纹信息：
 ```
-[Worker-0] 指纹: Chrome/122.0.0.0 Safari/537.36 | Asia/Hong_Kong | RTX 3060, OpenGL 4.5)
+[Worker-0] 指纹: UA=...Chrome/142.0.0.0 Safari/537.36 | TZ=Asia/Hong_Kong | Screen=1512x982 | DPR=2
 ```
 
-### 登录模式浏览器配置
+### 注册模式反检测脚本（11 项）
 
-```python
-fingerprint = generate_fingerprint()
-browser = p.chromium.launch(
-    headless=headless,
-    args=[
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-    ],
-    proxy=proxy_settings,
-)
-context = browser.new_context(
-    viewport=fingerprint['viewport'],
-    user_agent=fingerprint['user_agent'],
-    locale=fingerprint['locale'],
-    timezone_id=fingerprint['timezone_id'],
-)
-page = context.new_page()
-```
+注册模式注入完整的反检测初始化脚本：
 
-**特点：**
-- 简化配置，启动速度快
-- 随机指纹，降低关联检测风险
-- 每次启动都是全新浏览器，无历史数据
-- 适合已注册账号的登录验证
+| # | 伪造项 | 说明 |
+|---|--------|------|
+| 1 | `navigator.webdriver` | 设为 undefined，隐藏自动化标识 |
+| 2 | `navigator.platform` | 伪造为 MacIntel |
+| 3 | `navigator.language/languages` | 随机多语言数组 |
+| 4 | 硬件信息 | `hardwareConcurrency` + `deviceMemory` |
+| 5 | 屏幕信息 | width/height/availWidth/availHeight/colorDepth/pixelDepth/DPR |
+| 6 | `window.chrome` | 完整伪造 runtime/loadTimes/csi/app |
+| 7 | Permissions API | 修复 notifications 状态查询 |
+| 8 | WebGL | 完整伪造 vendor/renderer（含 OffscreenCanvas） |
+| 9 | Plugin 列表 | Playwright 默认已提供 |
+| 10 | 媒体设备 | 伪造摄像头/麦克风/扬声器 |
+| 11 | Automation 属性 | 删除 cdc_ 前缀变量 |
 
-### 注册模式浏览器配置
-
-```python
-fingerprint = generate_fingerprint()
-browser = p.chromium.launch(
-    headless=headless,
-    args=[
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-infobars',
-        f'--window-size={fingerprint["viewport"]["width"]},{fingerprint["viewport"]["height"]}',
-        '--start-maximized',
-    ]
-)
-context = browser.new_context(
-    viewport=fingerprint['viewport'],
-    user_agent=fingerprint['user_agent'],
-    locale=fingerprint['locale'],
-    timezone_id=fingerprint['timezone_id'],
-    proxy=proxy_settings,
-)
-page = context.new_page()
-```
-
-**反检测脚本注入（随机 WebGL）：**
-
-```javascript
-// 1. 隐藏 webdriver 属性
-Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined
-});
-
-// 2. 伪造 Chrome 对象
-window.chrome = {
-    runtime: {},
-    loadTimes: function() {},
-    csi: function() {},
-    app: {}
-};
-
-// 3. 修复 Permissions API
-const originalQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (parameters) => (
-    parameters.name === 'notifications' ?
-        Promise.resolve({ state: Notification.permission }) :
-        originalQuery(parameters)
-);
-
-// 4. 伪造 WebGL 信息（随机值）
-const getParameterProxyHandler = {
-    apply: function(target, thisArg, args) {
-        const param = args[0];
-        if (param === 37445) {  // UNMASKED_VENDOR_WEBGL
-            return '{webgl_vendor}';  // 随机：Google Inc. (Apple) / (NVIDIA) / (Intel)
-        }
-        if (param === 37446) {  // UNMASKED_RENDERER_WEBGL
-            return '{webgl_renderer}';  // 随机：M1/M2/RTX 3060/Iris Xe 等
-        }
-        return Reflect.apply(target, thisArg, args);
-    }
-};
-```
-
-**特点：**
-- 完整的反检测配置，降低被识别为自动化的风险
-- 随机伪造 WebGL 渲染器信息（Binance 会检测）
-- 随机 User-Agent、时区、语言
-- 适合新账号注册
-
-### 缓存预热模式（warmup_cache）
+### 缓存预热模式
 
 首次运行时自动执行，用于预热静态资源缓存：
-
-```python
-context = p.chromium.launch_persistent_context(
-    user_data_dir=str(MASTER_CACHE_DIR),  # 持久化用户数据目录
-    headless=headless,
-    args=[
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disk-cache-size=104857600',  # 100MB 磁盘缓存
-    ],
-    ignore_https_errors=True,
-    proxy=proxy_settings,
-)
-```
 
 **预热流程：**
 1. 访问登录页 `https://accounts.binance.com/zh-CN/login`
@@ -353,21 +273,8 @@ context = p.chromium.launch_persistent_context(
   local_cache/               # 应用层缓存（JS/CSS 文件）
     index.json               # 缓存索引
     <md5_hash>               # 缓存文件
+  worker_N/                  # Worker N 的浏览器 profile（运行时从 master 复制）
 ```
-
-### 浏览器指纹检测点
-
-Binance 会检测以下浏览器指纹：
-
-| 检测项 | 说明 | 应对措施 |
-|--------|------|----------|
-| `navigator.webdriver` | 自动化标识 | 设为 undefined |
-| `window.chrome` | Chrome 特有对象 | 伪造完整对象 |
-| WebGL Vendor/Renderer | 显卡信息 | 伪造为真实显卡 |
-| User-Agent | 浏览器标识 | 使用真实 Chrome UA |
-| 视口大小 | 窗口尺寸 | 固定 1920x1080 |
-| 时区/语言 | 地区信息 | 设为 Asia/Shanghai |
-| Permissions API | 权限查询 | 修复异常行为 |
 
 ---
 
@@ -398,29 +305,16 @@ MAX_CAPTCHA_FAILS = 3       # 验证码最大连续失败次数
 MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 ```
 
-每个阶段都会自动检测并处理：
-- 验证码弹窗（滑块/点击）
-- 风控错误页面
-- 白屏检测与刷新
-- 弹窗关闭（Cookie 弹窗、"已知晓"按钮等）
-- 未注册检测（返回 `"need_register"` 状态）
-
 ### 返回值说明
 
 | 返回值 | 含义 | CLI 处理 |
 |--------|------|----------|
 | `True` | 成功 | 计入成功数 |
-| `False` | 失败 | 重试（最多 3 次） |
+| `False` | 失败 | 重试（最多 max_login_retries 次） |
 | `"rate_limited"` | IP 被风控 | 不重试 |
 | `"need_register"` | 账号未注册 | 不重试，计入未注册数 |
 | `"already_registered"` | 账号已注册 | 不重试，计入已注册数 |
-
-### 风控检测
-
-以下关键词触发风控处理：
-- `网络连接失败`、`操作失败`、`PRECHECK`
-- `cap_too_many_attempts`、`208075`、`208061`
-- `认证失败，请刷新页面后重试`
+| `"imap_auth_failed"` | IMAP 认证失败 | 不重试，计入 IMAP 失败数 |
 
 ---
 
@@ -450,7 +344,7 @@ MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 2. 获取图片宽度
 3. 发送截图给 AI，识别缺口位置
 4. 计算滑动距离 = `gap_x - puzzle_x`
-5. 模拟人类滑动（缓动函数 + Y轴抖动 + 随机步数）
+5. 模拟人类滑动（多种缓动函数 + Y轴抖动 + 随机步数）
 6. 等待服务器验证
 
 **AI 返回格式：**
@@ -460,49 +354,57 @@ MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 
 ### 滑块拖动模拟
 
-```python
-# 缓动函数：先快后慢
-eased = progress * (2 - progress)
+支持多种缓动函数随机选择：
+- `ease_out` - 先快后慢
+- `ease_in_out` - 慢-快-慢
+- `linear_with_pause` - 匀速带随机暂停
 
+```python
 # 20-30 个随机步数
 steps = random.randint(20, 30)
-
 # Y 轴随机抖动 ±0.5px
 jitter_y = random.uniform(-0.5, 0.5)
-
 # 每步间隔 10-30ms
 time.sleep(random.uniform(0.01, 0.03))
 ```
 
 ### 验证码重试策略
 
-- 每轮最多 `max_attempts_per_round` 次尝试
-- 最多 `max_rounds` 轮（每轮重新加载页面）
-- AI 调用失败自动重试 3 次，间隔 1 秒
+- 每轮最多 `max_attempts_per_round` 次尝试（默认 5）
+- 最多 `max_rounds` 轮（默认 3，每轮重新加载页面）
+- AI 调用失败自动重试 3 次，带指数退避
 - 检测到风控签名时冷却 20-60 秒
-- 验证码消失需连续 5 次检测确认（间隔 500ms）
+- 验证码消失需连续检测确认
+
+---
+
+## 邮箱验证码
+
+### IMAP 模式
+
+标准 IMAP 连接获取验证码，支持：
+- 自动检测 Binance 发件人
+- 6 位验证码提取（支持中文/繁体/英文关键词）
+- HTML 邮件解析（含 `<strong>` 标签内验证码）
+- 过滤时间戳误匹配
+- 认证失败自动重试（最多 5 次）
+
+### Outlook API 模式
+
+`@outlook.com` 邮箱自动使用外部 API 拉码：
+- 轮询间隔 5 秒，超时 60 秒
+- 永久性错误（密码错误等）连续 3 次后停止
+- 从 subject 和 content 中提取验证码
 
 ---
 
 ## 本地缓存系统
 
-### 工作原理
-
-通过 Playwright 的 `page.route()` 拦截请求，对静态资源使用 `route.fulfill()` 直接从本地返回，零网络开销。
+通过 Playwright 的 `page.route()` 拦截请求，对静态资源使用 `route.fulfill()` 直接从本地返回。
 
 **缓存范围：**
 - `bin.bnbstatic.com/static` 的 JS/CSS
 - `public.bnbstatic.com/unpkg` 的 JS/CSS
-
-### Master/Worker 架构
-
-```
-.browser_cache/
-  master/          # 主缓存模板（预热生成）
-  local_cache/     # 应用层缓存（JS/CSS 文件）
-  worker_0/        # Worker 0 的浏览器 profile（运行时从 master 复制）
-  worker_1/        # Worker 1 的浏览器 profile
-```
 
 ### 缓存 vs 普通模式
 
@@ -511,53 +413,34 @@ time.sleep(random.uniform(0.01, 0.03))
 | 浏览器启动 | `launch_persistent_context` | `launch` (普通模式) |
 | 请求拦截 | `page.route("**/*")` | 无 |
 | 静态资源缓存 | `route.fulfill()` 本地返回 | 无 |
-| 流量消耗 | 首次 ~35MB，后续 ~8MB | 每次 ~69MB |
-
----
-
-## 流量监控
-
-每次运行结束后自动输出流量统计：
-
-```
-============================================================
-流量统计摘要
-============================================================
-实际网络流量: 8.23MB
-本地缓存命中: 30.85MB
-请求数: 345 (网络: 129, 缓存: 216)
-```
-
----
-
-## 输出结果
-
-成功账号写入 `output/registered_accounts.json`：
-
-```json
-{
-  "accounts": [
-    {
-      "name": "账号_user1",
-      "email": "user1@example.com",
-      "cookie": "cr00=xxx; csrftoken=xxx; ...",
-      "csrftoken": "md5_hash_of_cr00",
-      "enabled": true
-    }
-  ]
-}
-```
 
 ---
 
 ## 日志系统
 
 ```
-logs/
-  2024-01-15.log                    # 每日全局摘要日志
-  failures/
-    user1_at_example_com_20240115.log  # 失败账号详细日志
+output/logs/
+  binance_YYYY-MM-DD.log               # 每日主日志（完整执行过程）
+  success/
+    YYYY-MM-DD.log                      # 当日成功账号列表（含 already_registered）
+  failure/
+    YYYY-MM-DD.log                      # 当日失败账号列表
 ```
+
+运行结束后自动输出当日汇总统计（总数、成功、失败、IP风控、成功率）。
+
+---
+
+## 异常处理
+
+自定义异常层级，支持可重试/不可重试分类：
+
+- `CaptchaError` - 验证码相关错误
+- `IMAPError` → `IMAPAuthFailed` / `IMAPConnectionError` / `IMAPTimeout`
+- `BrowserError` - 浏览器相关错误
+- `ConfigError` - 配置错误
+
+`utils.retry_with_backoff()` 提供指数退避重试，带 jitter 随机化。
 
 ---
 
@@ -580,7 +463,14 @@ IP 被风控，解决方案：
 
 - 确认 IMAP 配置正确
 - 检查邮箱是否开启了 IMAP 访问
+- Outlook 邮箱会自动使用 API 模式
 - 超时时间默认 90 秒
+
+### IMAP 认证失败
+
+- 检查邮箱密码是否正确
+- 确认邮箱已开启 IMAP 服务
+- 返回 `"imap_auth_failed"` 后不会重试
 
 ---
 

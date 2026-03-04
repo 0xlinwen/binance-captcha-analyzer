@@ -1,5 +1,6 @@
 import random
 import time
+import logging
 
 from .captcha_ai import (
     analyze_click_captcha,
@@ -7,29 +8,40 @@ from .captcha_ai import (
     parse_json_response,
     screenshot_to_base64,
 )
+from .constants import (
+    AI_RETRY_COUNT,
+    RETRY_BASE_DELAY,
+    CAPTCHA_STABILITY_CHECK_COUNT,
+    CAPTCHA_STABILITY_CHECK_INTERVAL_MS,
+)
+from .utils import retry_with_backoff, log_step, dismiss_global_modal
+from .exceptions import CaptchaAIError, CaptchaTimeout
+
+logger = logging.getLogger(__name__)
 
 FAST_DRAG_STEPS = 2
-MAX_COOLDOWN_SECONDS = 120  # 增加到2分钟
-AI_RETRY_COUNT = 3  # AI 调用重试次数
-AI_RETRY_DELAY = 1  # AI 重试间隔（秒）
+MAX_COOLDOWN_SECONDS = 30  # 30秒
 
 
 def _call_ai_with_retry(api_func, *args, max_retries=AI_RETRY_COUNT, **kwargs):
-    """带重试的 AI 调用封装"""
-    last_error = None
-    for attempt in range(max_retries):
+    """带重试的 AI 调用封装（使用统一的重试机制）"""
+    def _call():
         try:
-            result = api_func(*args, **kwargs)
-            return result
+            return api_func(*args, **kwargs)
         except Exception as e:
-            last_error = e
-            print(f"[AI] 调用失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(AI_RETRY_DELAY)
-    raise last_error
+            # 将所有 AI 调用异常包装为 CaptchaAIError（可重试）
+            raise CaptchaAIError(f"AI 调用失败: {e}") from e
+
+    return retry_with_backoff(
+        _call,
+        max_retries=max_retries,
+        base_delay=RETRY_BASE_DELAY,
+        logger=logger,
+        operation_name="AI 验证码识别"
+    )
 
 
-def _captcha_gone_stably(page, checks=5, interval_ms=500):
+def _captcha_gone_stably(page, checks=CAPTCHA_STABILITY_CHECK_COUNT, interval_ms=CAPTCHA_STABILITY_CHECK_INTERVAL_MS):
     """Confirm captcha is absent across multiple checks to avoid transient false positives."""
     for idx in range(max(1, checks)):
         captcha_type, _ = detect_captcha_type(page)
@@ -166,55 +178,6 @@ def detect_captcha_type(page):
     return "unknown", None
 
 
-def dismiss_global_modal(page):
-    """Dismiss blocking global modal in current page only."""
-    try:
-        modal = page.query_selector("#globalmodal-common")
-        if not modal or not modal.is_visible():
-            return False
-    except Exception:
-        return False
-
-    selectors = [
-        "#globalmodal-common button:has-text('已知晓')",
-        "#globalmodal-common button:has-text('确定')",
-        "#globalmodal-common button:has-text('关闭')",
-        "#globalmodal-common button:has-text('OK')",
-        "#globalmodal-common button:has-text('Got it')",
-        "#globalmodal-common button:has-text('Close')",
-        "#globalmodal-common [aria-label='Close']",
-        "#globalmodal-common .close",
-    ]
-    for selector in selectors:
-        try:
-            btn = page.query_selector(selector)
-            if btn and btn.is_visible():
-                btn.click(timeout=2500, force=True)
-                page.wait_for_timeout(300)
-                print(f"关闭全局弹窗: {selector}")
-                return True
-        except Exception:
-            pass
-
-    try:
-        page.evaluate(
-            """
-            () => {
-              const n = document.querySelector('#globalmodal-common');
-              if (!n) return false;
-              n.style.display = 'none';
-              n.style.pointerEvents = 'none';
-              return true;
-            }
-            """
-        )
-        page.wait_for_timeout(150)
-        print("通过注入样式隐藏全局弹窗")
-        return True
-    except Exception:
-        return False
-
-
 def click_captcha_images(page, positions, click_retry_per_cell=3):
     """Click cells in currently visible captcha container to avoid stale/intercepted elements."""
     clicked = []
@@ -308,12 +271,12 @@ def solve_captcha(
     max_rounds=1,
     reload_url=None,
     page_timeout=60000,
-    cooldown_min_sec=30,
-    cooldown_max_sec=90,
+    cooldown_min_sec=5,
+    cooldown_max_sec= MAX_COOLDOWN_SECONDS,
     click_retry_per_cell=3,
 ):
     # 添加观察延迟（模拟人类看验证码的时间）
-    observation_delay = random.uniform(0.8, 2.0)
+    observation_delay = random.uniform(0.4, 1.5)
     print(f"[验证码] 观察验证码 {observation_delay:.1f}秒...")
     time.sleep(observation_delay)
 

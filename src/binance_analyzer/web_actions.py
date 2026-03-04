@@ -1,63 +1,18 @@
 import random
 import time
 import traceback
+import logging
 
+from .utils import dismiss_global_modal
 
-def dismiss_global_modal(page):
-    """Dismiss blocking global modal in current page only."""
-    try:
-        modal = page.query_selector("#globalmodal-common")
-        if not modal or not modal.is_visible():
-            return False
-    except Exception:
-        return False
-
-    selectors = [
-        "#globalmodal-common button:has-text('已知晓')",
-        "#globalmodal-common button:has-text('确定')",
-        "#globalmodal-common button:has-text('关闭')",
-        "#globalmodal-common button:has-text('OK')",
-        "#globalmodal-common button:has-text('Got it')",
-        "#globalmodal-common button:has-text('Close')",
-        "#globalmodal-common [aria-label='Close']",
-        "#globalmodal-common .close",
-    ]
-    for selector in selectors:
-        try:
-            btn = page.query_selector(selector)
-            if btn and btn.is_visible():
-                btn.click(timeout=2500, force=True)
-                page.wait_for_timeout(300)
-                print(f"关闭全局弹窗: {selector}")
-                return True
-        except Exception:
-            pass
-
-    # Fallback: hide overlay in current page only.
-    try:
-        page.evaluate(
-            """
-            () => {
-              const n = document.querySelector('#globalmodal-common');
-              if (!n) return false;
-              n.style.display = 'none';
-              n.style.pointerEvents = 'none';
-              return true;
-            }
-            """
-        )
-        page.wait_for_timeout(150)
-        print("通过注入样式隐藏全局弹窗")
-        return True
-    except Exception:
-        return False
+logger = logging.getLogger(__name__)
 
 
 def click_button(scope, texts):
     """Click button containing any text inside scope(page/locator/element)."""
     try:
         if hasattr(scope, "query_selector"):
-            dismiss_global_modal(scope)
+            dismiss_global_modal(scope, logger=logger)
     except Exception:
         pass
 
@@ -69,7 +24,7 @@ def click_button(scope, texts):
                     btn.click(timeout=5000)
                 except Exception:
                     btn.click(timeout=5000, force=True)
-                print(f"点击了按钮: {text}")
+                logger.info(f"点击了按钮: {text}")
                 return True
         except Exception:
             pass
@@ -91,7 +46,7 @@ def dismiss_cookie_popup(page):
                 btn = page.query_selector(selector)
                 if btn and btn.is_visible():
                     btn.click()
-                    print(f"关闭了 Cookie 弹窗: {selector}")
+                    logger.info(f"关闭了 Cookie 弹窗: {selector}")
                     page.wait_for_timeout(random.randint(400, 600))
                     return True
             except Exception:
@@ -102,7 +57,7 @@ def dismiss_cookie_popup(page):
 
 
 def input_email(page, email_addr):
-    dismiss_global_modal(page)
+    dismiss_global_modal(page, logger=logger)
     dismiss_cookie_popup(page)
     page.wait_for_timeout(random.randint(400, 600))
 
@@ -122,7 +77,7 @@ def input_email(page, email_addr):
             el = page.query_selector(selector)
             if el and el.is_visible():
                 email_input = el
-                print(f"找到邮箱输入框: {selector}")
+                logger.info(f"找到邮箱输入框: {selector}")
                 break
         except Exception:
             pass
@@ -133,7 +88,7 @@ def input_email(page, email_addr):
         email_input.fill("")
         time.sleep(random.uniform(0.1, 0.2))
         email_input.type(email_addr, delay=random.randint(50, 100))
-        print(f"输入邮箱: {email_addr}")
+        logger.info(f"输入邮箱: {email_addr}")
         return True
 
     inputs = page.query_selector_all("input[type='text'], input:not([type])")
@@ -141,22 +96,22 @@ def input_email(page, email_addr):
         inputs[0].click()
         time.sleep(random.uniform(0.2, 0.4))
         inputs[0].type(email_addr, delay=random.randint(50, 100))
-        print(f"使用兜底输入框输入邮箱: {email_addr}")
+        logger.info(f"使用兜底输入框输入邮箱: {email_addr}")
         return True
 
-    print("[ERROR] 未找到邮箱输入框!")
+    logger.error("未找到邮箱输入框!")
     return False
 
 
 def click_login_continue_strict(page):
     """Click the continue button bound to login email flow, avoid passkey entry."""
-    dismiss_global_modal(page)
+    dismiss_global_modal(page, logger=logger)
 
     email_input = page.query_selector(
         "input[data-e2e='input-username'], input[name='username'], input[name='email'], input[type='email']"
     )
     if not email_input or not email_input.is_visible():
-        print("[ERROR] 未找到登录邮箱输入框，无法严格点击继续")
+        logger.error("未找到登录邮箱输入框，无法严格点击继续")
         return False
 
     # Prefer submit buttons near email form and exclude passkey-related buttons.
@@ -213,7 +168,7 @@ def click_login_continue_strict(page):
                     btn.click(timeout=5000)
                 except Exception:
                     btn.click(timeout=5000, force=True)
-                print(f"点击了登录继续按钮: {selector}")
+                logger.info(f"点击了登录继续按钮: {selector}")
                 return True
         except Exception:
             pass
@@ -249,22 +204,22 @@ def click_login_continue_strict(page):
             }"""
         )
         if clicked:
-            print("通过 JavaScript 点击了继续按钮")
+            logger.info("通过 JavaScript 点击了继续按钮")
             return True
     except Exception as e:
-        print(f"JavaScript 点击按钮失败: {e}")
+        logger.warning(f"JavaScript 点击按钮失败: {e}")
 
     # 最后尝试回车提交
     try:
         email_input.press("Enter")
-        print("未找到继续按钮，使用回车提交")
+        logger.info("未找到继续按钮，使用回车提交")
         return True
     except Exception:
         return False
 
 
 def input_password(page, password):
-    dismiss_global_modal(page)
+    dismiss_global_modal(page, logger=logger)
     password_input = page.query_selector("input[name='password'], input[type='password']")
     if password_input:
         password_input.click()
@@ -275,7 +230,7 @@ def input_password(page, password):
             password_input.fill("")
             time.sleep(random.uniform(0.1, 0.2))
         password_input.type(password, delay=random.randint(30, 80))
-        print("密码已输入")
+        logger.info("密码已输入")
         return True
     return False
 
@@ -301,7 +256,7 @@ def need_register(page):
 def goto_with_retry(page, url, page_timeout, max_retries=3):
     for attempt in range(max_retries):
         try:
-            print(f"正在访问: {url}")
+            logger.info(f"正在访问: {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
             page.wait_for_timeout(random.randint(1800, 2200))
 
@@ -321,12 +276,12 @@ def goto_with_retry(page, url, page_timeout, max_retries=3):
             ]
             for keyword in error_keywords:
                 if keyword.lower() in body_text.lower():
-                    print(f"检测到错误关键词: {keyword}")
+                    logger.warning(f"检测到错误关键词: {keyword}")
                     return False
             return True
         except Exception as e:
-            print(f"页面加载失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-            print(f"异常详情: {traceback.format_exc()}")
+            logger.warning(f"页面加载失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            logger.debug(f"异常详情: {traceback.format_exc()}")
             if attempt < max_retries - 1:
                 time.sleep(2)
     return False

@@ -1,5 +1,0 @@
-2026/02/23-21:26:23.428 179734 Creating DB /Users/mac/claude/binance_captcha_analyzer/.browser_cache/master/Default/IndexedDB/https_accounts.binance.com_0.indexeddb.leveldb since it was missing.
-2026/02/23-21:26:23.430 179734 Reusing MANIFEST /Users/mac/claude/binance_captcha_analyzer/.browser_cache/master/Default/IndexedDB/https_accounts.binance.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/02/23-21:26:28.742 179735 Level-0 table #5: started
-2026/02/23-21:26:28.751 179735 Level-0 table #5: 2900322 bytes OK
-2026/02/23-21:26:28.753 179735 Delete type=0 #3

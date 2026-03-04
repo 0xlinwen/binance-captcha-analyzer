@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import load_config
 from .orchestrator import register_account, warmup_cache, MASTER_CACHE_DIR, CACHE_DIR
 from .storage import cleanup_screenshots, load_accounts
+from .logger import get_logger_manager
 
 executor_ref = None
 
@@ -199,6 +200,16 @@ def main():
 
     cleanup_screenshots(screenshots_dir)
 
+    # 实际成功数 = 成功 + 已注册
+    total_success = success_count + already_registered_count
+
     print(f"\n{'='*50}")
-    print(f"完成 | 成功: {success_count} | 失败: {fail_count}")
+    print(f"完成 | 成功: {total_success}（注册成功: {success_count} | 已注册: {already_registered_count}）| 失败: {fail_count}")
+    if need_register_count > 0:
+        print(f"     未注册(需切换register模式): {need_register_count}")
+    if imap_auth_failed_count > 0:
+        print(f"     IMAP认证失败: {imap_auth_failed_count}")
     print(f"{'='*50}")
+
+    # 写入每日日志汇总（success/ failure/ 目录 + 统计行）
+    get_logger_manager().log_daily_summary()

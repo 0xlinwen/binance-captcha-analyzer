@@ -1,9 +1,6 @@
 import random
-import logging
-import os
-import threading
+import time
 from datetime import datetime
-from io import StringIO
 
 from .captcha_solver import solve_captcha_if_present
 from .email_imap import get_initial_mail_count, handle_email_verification
@@ -15,126 +12,45 @@ from .web_actions import (
     input_password,
     need_register,
 )
+from .logger import get_logger_manager
+from .utils import wait_for_url_change
+from .constants import (
+    MAX_CAPTCHA_FAILS,
+    URL_CHANGE_TIMEOUT_MS,
+)
 
 
 # URL 状态机最大迭代次数
 MAX_TOTAL_ITERATIONS = 50
 # 单个 URL 状态最大重试次数
 MAX_URL_RETRIES = 10
-# 验证码最大连续失败次数
-MAX_CAPTCHA_FAILS = 3
 # MFA 最大重试次数
 MAX_MFA_RETRIES = 3
 
 
-# 全局日志文件（按日期）
-_logger_lock = threading.Lock()
-_daily_logger = None
-_daily_log_date = None
-# 失败日志文件句柄缓存（按账号）
-_failure_loggers = {}
-
-
-def _get_daily_logger():
-    """获取按日期的全局日志"""
-    global _daily_logger, _daily_log_date
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    with _logger_lock:
-        if _daily_logger is None or _daily_log_date != today:
-            log_dir = "logs"
-            os.makedirs(log_dir, exist_ok=True)
-
-            _daily_logger = logging.getLogger("binance_daily")
-            _daily_logger.setLevel(logging.INFO)
-            _daily_logger.handlers.clear()
-
-            log_file = os.path.join(log_dir, f"{today}.log")
-            file_handler = logging.FileHandler(log_file, encoding='utf-8')
-            file_handler.setLevel(logging.INFO)
-            formatter = logging.Formatter('%(asctime)s | %(message)s')
-            file_handler.setFormatter(formatter)
-            _daily_logger.addHandler(file_handler)
-            _daily_log_date = today
-
-        return _daily_logger
-
-
-def _get_failure_logger(email_addr):
-    """获取账号专用的失败日志 logger（同账号多次重试写入同一文件）"""
-    global _failure_loggers
-
-    with _logger_lock:
-        if email_addr in _failure_loggers:
-            return _failure_loggers[email_addr]
-
-        log_dir = "logs/failures"
-        os.makedirs(log_dir, exist_ok=True)
-
-        # 使用日期作为文件名的一部分，同一天同账号写入同一文件
-        today = datetime.now().strftime("%Y%m%d")
-        safe_email = email_addr.replace("@", "_at_").replace(".", "_")
-        log_file = os.path.join(log_dir, f"{safe_email}_{today}.log")
-
-        logger = logging.getLogger(f"failure_{email_addr}")
-        logger.setLevel(logging.DEBUG)
-        logger.handlers.clear()
-
-        file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
-        file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s | %(message)s')
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-        _failure_loggers[email_addr] = logger
-        return logger
-
-
 def setup_logger(email_addr):
-    """为每个账号设置日志"""
-    # 创建账号专用 logger（内存缓存）
-    logger = logging.getLogger(f"flows_{email_addr}_{datetime.now().timestamp()}")
-    logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
-
-    # 内存 handler（缓存详细日志，失败时写入文件）
-    memory_stream = StringIO()
-    memory_handler = logging.StreamHandler(memory_stream)
-    memory_handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s | %(message)s')
-    memory_handler.setFormatter(formatter)
-    logger.addHandler(memory_handler)
-
-    # 保存引用
-    logger.memory_stream = memory_stream
-    logger.email_addr = email_addr
-
-    return logger
+    """为每个账号设置日志（使用统一的日志管理器）"""
+    logger_manager = get_logger_manager()
+    return logger_manager.get_account_logger(email_addr, log_type="account")
 
 
 def save_failure_log(logger, email_addr):
-    """失败时保存详细日志到账号专用文件（同账号同天追加）"""
-    if not hasattr(logger, 'memory_stream'):
-        return
-
-    log_content = logger.memory_stream.getvalue()
-    if not log_content:
-        return
-
-    failure_logger = _get_failure_logger(email_addr)
+    """失败时保存详细日志到账号专用文件（使用统一的日志管理器）"""
+    # 新的日志系统已经自动写入文件，这里只需要记录失败标记
+    logger_manager = get_logger_manager()
+    failure_logger = logger_manager.get_failure_logger(email_addr)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     failure_logger.info(f"\n{'='*60}")
     failure_logger.info(f"尝试时间: {timestamp}")
+    failure_logger.info(f"账号: {email_addr}")
+    failure_logger.info(f"状态: 失败")
     failure_logger.info(f"{'='*60}")
-
-    # 写入内存中的日志内容
-    for line in log_content.strip().split('\n'):
-        failure_logger.info(line)
 
 
 def log_summary(email_addr, success, duration_sec, extra_info="", stage="", iterations=0):
-    """记录摘要到全局日志"""
-    daily_logger = _get_daily_logger()
+    """记录摘要到全局日志（使用统一的日志管理器）"""
+    logger_manager = get_logger_manager()
+    daily_logger = logger_manager.get_daily_logger()
     status = "成功" if success else "失败"
 
     parts = [f"[{email_addr}]", status]
@@ -278,7 +194,7 @@ def _dismiss_error_popup(page, logger=None):
 
 def _check_url_change(page, url_before, action_name, wait_ms=1000, logger=None):
     """
-    检查URL是否变化，用于检测页面跳转
+    检查URL是否变化，用于检测页面跳转（使用统一的 wait_for_url_change）
 
     Args:
         page: Playwright page对象
@@ -290,40 +206,17 @@ def _check_url_change(page, url_before, action_name, wait_ms=1000, logger=None):
     Returns:
         新的URL
     """
-    try:
-        # 轮询检测URL变化，每100ms检查一次
-        poll_interval = 100
-        max_polls = wait_ms // poll_interval
-        for _ in range(max_polls):
-            page.wait_for_timeout(poll_interval)
-            url_after = page.url
-            if url_after != url_before:
-                msg = f"URL变化 {action_name} 后: {url_before} -> {url_after}"
-                if logger:
-                    logger.info(msg)
-                return url_after
-
-        # 超时后返回当前URL
-        url_after = page.url
-        if url_after != url_before:
-            msg = f"URL变化 {action_name} 后: {url_before} -> {url_after}"
-            if logger:
-                logger.info(msg)
-        else:
-            msg = f"{action_name} 后URL未变化: {url_before}"
-            if logger:
-                logger.info(msg)
-        return url_after
-    except Exception as e:
-        msg = f"_check_url_change 异常: {e}"
-        if logger:
-            logger.error(msg)
-        return url_before
+    changed, url_after = wait_for_url_change(page, url_before, timeout_ms=wait_ms, logger=logger)
+    if changed and logger:
+        logger.info(f"URL变化 {action_name} 后: {url_before} -> {url_after}")
+    elif not changed and logger:
+        logger.info(f"{action_name} 后URL未变化: {url_before}")
+    return url_after
 
 
 def _wait_for_url_change(page, url_before, timeout_ms=5000, logger=None):
     """
-    等待URL发生变化，用于关键操作后的页面跳转检测
+    等待URL发生变化，用于关键操作后的页面跳转检测（使用统一的 wait_for_url_change）
 
     Args:
         page: Playwright page对象
@@ -334,31 +227,7 @@ def _wait_for_url_change(page, url_before, timeout_ms=5000, logger=None):
     Returns:
         tuple: (changed: bool, new_url: str)
     """
-    try:
-        poll_interval = 200
-        max_polls = timeout_ms // poll_interval
-        for i in range(max_polls):
-            page.wait_for_timeout(poll_interval)
-            url_after = page.url
-            if url_after != url_before:
-                if logger:
-                    logger.info(f"URL变化检测成功 ({(i+1)*poll_interval}ms): {url_before} -> {url_after}")
-                return True, url_after
-
-        # 超时
-        url_after = page.url
-        if url_after != url_before:
-            if logger:
-                logger.info(f"URL在超时边界变化: {url_before} -> {url_after}")
-            return True, url_after
-
-        if logger:
-            logger.info(f"URL等待超时 ({timeout_ms}ms)，未发生变化: {url_before}")
-        return False, url_before
-    except Exception as e:
-        if logger:
-            logger.error(f"_wait_for_url_change 异常: {e}")
-        return False, url_before
+    return wait_for_url_change(page, url_before, timeout_ms=timeout_ms, logger=logger)
 
 
 def _wait_for_page_response(page, url_before, timeout_ms=5000, logger=None):
@@ -1127,18 +996,59 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
                 page.wait_for_timeout(cooldown)
 
-            # 验证码处理后等待URL变化（最多等待5秒）
-            changed, url_after = _wait_for_url_change(page, url, timeout_ms=5000, logger=logger)
+            # 验证码处理后等待URL变化（增加到10秒，验证码服务器验证+跳转需要时间）
+            changed, url_after = _wait_for_url_change(page, url, timeout_ms=10000, logger=logger)
 
-            # 如果验证码通过但URL仍然是密码页，说明可能被风控重置了
+            # 如果验证码通过但URL仍然是密码页，需要细分原因
             if captcha_result is True and ("/register/register-set-password" in url_after or "/register-set-password" in url_after):
-                console_log(email_addr, "验证码通过但页面未跳转，可能触发风控", "error")
-                logger.error("验证码通过但页面停留在密码页，疑似风控")
-                duration = (datetime.now() - start_time).total_seconds()
-                log_summary(email_addr, False, duration, stage="register", extra_info="验证码后风控")
-                save_failure_log(logger, email_addr)
-                cleanup_listeners()
-                return "rate_limited"
+                console_log(email_addr, "验证码通过但页面未跳转，检查原因...", "warning")
+                logger.warning("验证码通过但页面停留在密码页，进一步检查")
+
+                # ── 优先检查是否是"已注册"弹窗 ────────────────────────
+                page.wait_for_timeout(1500)
+                already_reg_selectors = [
+                    "text=账号已存在",
+                    "text=该邮箱已注册",
+                    "text=Email already",
+                    "text=already registered",
+                    "text=already exists",
+                    "text=208001",  # Binance 已注册错误码
+                ]
+                for sel in already_reg_selectors:
+                    try:
+                        el = page.query_selector(sel)
+                        if el and el.is_visible():
+                            console_log(email_addr, "检测到已注册提示，标记为已注册", "warning")
+                            logger.info(f"密码页检测到已注册: {sel}")
+                            _dismiss_error_popup(page, logger)
+                            duration = (datetime.now() - start_time).total_seconds()
+                            log_summary(email_addr, False, duration, stage="register", extra_info="已注册")
+                            cleanup_listeners()
+                            return "already_registered"
+                    except Exception:
+                        pass
+
+                # ── 再等 3 秒，给页面跳转最后机会 ────────────────────
+                changed2, url_after2 = _wait_for_url_change(page, url_after, timeout_ms=3000, logger=logger)
+                if changed2:
+                    logger.info(f"延迟跳转成功: {url_after2}")
+                    url_after = url_after2
+                else:
+                    # ── 确认是否真的有风控错误 ───────────────────────
+                    has_risk_now, body_text = _has_risk_error(page, logger)
+                    if has_risk_now:
+                        console_log(email_addr, "确认触发风控，停止注册", "error")
+                        logger.error(f"风控错误内容: {body_text[:300]}")
+                        duration = (datetime.now() - start_time).total_seconds()
+                        log_summary(email_addr, False, duration, stage="register", extra_info="验证码后风控")
+                        save_failure_log(logger, email_addr)
+                        cleanup_listeners()
+                        return "rate_limited"
+                    else:
+                        # 无风控错误，可能只是页面慢，继续状态机下一轮
+                        console_log(email_addr, "无风控错误，继续等待跳转", "warning")
+                        logger.warning("密码页未跳转但无风控错误，继续状态机")
+                        url_after = page.url
 
             url = url_after
             continue
@@ -1233,10 +1143,8 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
                 page.wait_for_timeout(cooldown)
 
-            # 验证码处理后等待URL变化（最多等待5秒）
-            changed, url_after = _wait_for_url_change(page, url, timeout_ms=5000, logger=logger)
-
-            # 如果验证码通过但URL仍然是注册页，说明可能被风控重置了
+            # 验证码处理后等待URL变化（增加到10秒）
+            changed, url_after = _wait_for_url_change(page, url, timeout_ms=10000, logger=logger)
             if captcha_result is True and "/register" in url_after and "/register/" not in url_after:
                 console_log(email_addr, "验证码通过但页面未跳转，检查是否风控", "warning")
                 logger.warning("验证码通过但页面回到注册页，检查页面内容")

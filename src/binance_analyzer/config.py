@@ -9,6 +9,14 @@ def load_config(base_dir: Path) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
+    # 兼容 mode 大小写/空白与别名
+    mode = str(config.get("mode", "login")).strip().lower()
+    alias_map = {
+        "signup": "register",
+        "sign_up": "register",
+    }
+    config["mode"] = alias_map.get(mode, mode)
+
     config.setdefault("login", {})
     config["login"].setdefault("start_url", "https://accounts.binance.com/zh-CN/login")
 
