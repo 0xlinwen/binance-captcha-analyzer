@@ -162,7 +162,7 @@ MAX_WORKER_COUNT = 50
 BINANCE_LOGIN_URL = "https://www.binance.com/en/login"
 
 # Binance 注册页面
-BINANCE_REGISTER_URL = "https://www.binance.com/en/register"
+BINANCE_REGISTER_URL = "https://accounts.binance.com/zh-CN/register"
 
 # Binance 首页
 BINANCE_HOME_URL = "https://www.binance.com/en"

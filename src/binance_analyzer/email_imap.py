@@ -1,5 +1,6 @@
 import email
 import imaplib
+import random
 import re
 import time
 import logging
@@ -567,7 +568,9 @@ def handle_email_verification(
         return False
 
     logger.info(f"输入验证码: {email_code}")
-    code_input.fill(email_code)
+    code_input.click()
+    time.sleep(random.uniform(0.1, 0.2))
+    code_input.type(email_code, delay=random.randint(40, 80))
     page.wait_for_timeout(900)
 
     if not _submit_mfa(page):

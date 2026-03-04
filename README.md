@@ -199,13 +199,63 @@ python main.py --refresh-cache
 
 | 特性 | 登录模式 | 注册模式 |
 |------|----------|----------|
-| 浏览器启动 | `chromium.launch()` + `new_context()` | `chromium.launch()` + `new_context()` |
+| 浏览器启动 | subprocess + `connect_over_cdp()` | subprocess + `connect_over_cdp()` |
 | 反检测脚本 | 完整 11 项伪造 | 完整 11 项伪造 |
 | User-Agent | 随机 Chrome 138-145 | 随机 Chrome 138-145 |
 | 视口大小 | 随机（基于指纹配置） | 随机（基于指纹配置） |
 | 时区/语言 | 随机 | 随机 |
 | WebGL 伪造 | 随机 Mac Apple Silicon 显卡 | 随机 Mac Apple Silicon 显卡 |
 | 屏幕/硬件伪造 | 完整伪造 | 完整伪造 |
+| 输入方式 | `insert_text()` 粘贴式 | `insert_text()` 粘贴式 |
+
+### 浏览器启动方式
+
+使用 subprocess 直接启动 Playwright 内置 Chromium，不经过 `chromium.launch()`，避免 Playwright 自动注入 `--enable-automation` 等 30+ 自动化标志：
+
+```python
+# orchestrator.py - _build_context()
+cmd = [
+    chromium_path,                                    # Playwright 内置 Chromium
+    f'--remote-debugging-port={port}',
+    f'--user-data-dir={user_data_dir}',
+    '--disable-blink-features=AutomationControlled',  # 禁用自动化特征
+    '--no-first-run',
+    '--no-default-browser-check',
+    ...
+]
+chrome_process = subprocess.Popen(cmd, ...)
+browser = p.chromium.connect_over_cdp(f'http://127.0.0.1:{port}')
+```
+
+对比 Playwright 默认 `chromium.launch()` 的区别：
+
+| 特性 | `chromium.launch()` | subprocess + CDP |
+|------|---------------------|------------------|
+| `--enable-automation` | 自动添加，无法移除 | 不添加 |
+| `navigator.webdriver` | `true` | `undefined` |
+| 自动化标志 | 30+ 个 | 仅必要参数 |
+| CDP Fetch.enable | 可能启用 | 不启用（除非开缓存） |
+
+### 输入行为反检测
+
+Binance 的行为分析系统会检测键盘输入模式。Playwright 的 `type()` 方法逐字符输入，每个字符间隔均匀（50-100ms），这是典型的自动化特征。
+
+解决方案：使用 `keyboard.insert_text()` 一次性插入文本（等同于 Cmd+V 粘贴），与真人操作一致：
+
+```python
+# web_actions.py
+# 之前（被检测）：
+element.type(email_addr, delay=random.randint(50, 100))
+
+# 现在（通过）：
+page.keyboard.insert_text(email_addr)  # 等同于粘贴
+```
+
+| 方法 | 行为 | 事件 | 检测风险 |
+|------|------|------|----------|
+| `type()` | 逐字符，均匀间隔 | 每字符 keydown/keypress/keyup | 高（节奏均匀） |
+| `fill()` | JS 直接设置 value | 无键盘事件 | 高（无事件链） |
+| `insert_text()` | 一次性插入 | input 事件，isTrusted=true | 低（等同粘贴） |
 
 ### 指纹随机化
 

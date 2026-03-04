@@ -1,6 +1,9 @@
 import hashlib
 import random
 import shutil
+import subprocess
+import socket
+import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -12,6 +15,29 @@ from .local_cache import init_cache_manager, get_cache_manager
 from .fingerprint import generate_fingerprint
 
 PAGE_TIMEOUT = 60000
+
+# Playwright Chromium 路径
+_CHROMIUM_PATH = None
+
+def _get_chromium_path():
+    """获取 Playwright Chromium 可执行文件路径（懒加载）"""
+    global _CHROMIUM_PATH
+    if _CHROMIUM_PATH is None:
+        import subprocess as _sp
+        result = _sp.run(
+            ['python3', '-c', 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()'],
+            capture_output=True, text=True
+        )
+        _CHROMIUM_PATH = result.stdout.strip()
+        if not _CHROMIUM_PATH:
+            raise RuntimeError(f"无法获取 Chromium 路径: {result.stderr}")
+    return _CHROMIUM_PATH
+
+def _find_free_port():
+    """找一个可用的端口"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
 
 # 缓存目录
 CACHE_DIR = Path(__file__).resolve().parents[2] / ".browser_cache"
@@ -153,22 +179,18 @@ Object.defineProperty(screen, 'pixelDepth',  {{ get: () => {pixel_depth} }});
 Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ratio} }});
 
 (function() {{
-    const _TOOLBAR_H = 85;  // macOS Chrome 工具栏约 85px
-    const _TOOLBAR_W = 2;
+    // 实测：真实Chrome outerWidth === innerWidth（无差值），只有outerHeight因工具栏大于innerHeight
+    // outerWidth 不伪造，让Playwright自然值即可
+    const _TOOLBAR_H = 85;
     Object.defineProperty(window, 'outerHeight', {{
         get: function() {{ return window.innerHeight + _TOOLBAR_H; }},
         configurable: true,
     }});
-    Object.defineProperty(window, 'outerWidth', {{
-        get: function() {{ return window.innerWidth + _TOOLBAR_W; }},
-        configurable: true,
-    }});
 }})();
 
-// ── 5. chrome 对象（修复 webstore/runtime constructor 报错）──────
-// 修复3: 之前 webstore/runtime 是普通对象字面量，constructor 属性指向 Object
-//        检测工具访问 chrome.webstore.constructor 时返回 TypeError
-//        修复：用 Object.create(null) + 手动设置让它看起来像内置对象
+// ── 5. chrome 对象 ──────────────────────────────────────────────
+// 实测真实Chrome：webstore/runtime 已被移除，访问会 TypeError，这才是真实表现
+// 不伪造 webstore/runtime，只保留 loadTimes/csi/app 这些真实存在的属性
 (function() {{
     function makeNativeFunction(name, fn) {{
         try {{
@@ -181,31 +203,6 @@ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ra
         }} catch(e) {{}}
         return fn;
     }}
-
-    const chromeWebstore = {{
-        onInstallStageChanged: {{ addListener: function() {{}}, removeListener: function() {{}} }},
-        onDownloadProgress:    {{ addListener: function() {{}}, removeListener: function() {{}} }},
-        install: makeNativeFunction('install', function() {{ return Promise.resolve(); }}),
-    }};
-
-    const chromeRuntime = {{
-        PlatformOs:  {{ MAC:'mac', WIN:'win', ANDROID:'android', CROS:'cros', LINUX:'linux', OPENBSD:'openbsd' }},
-        PlatformArch: {{ ARM:'arm', X86_32:'x86-32', X86_64:'x86-64' }},
-        RequestUpdateCheckStatus: {{ THROTTLED:'throttled', NO_UPDATE:'no_update', UPDATE_AVAILABLE:'update_available' }},
-        OnInstalledReason: {{ INSTALL:'install', UPDATE:'update', CHROME_UPDATE:'chrome_update', SHARED_MODULE_UPDATE:'shared_module_update' }},
-        OnRestartRequiredReason: {{ APP_UPDATE:'app_update', OS_UPDATE:'os_update', PERIODIC:'periodic' }},
-        connect: makeNativeFunction('connect', function() {{
-            return {{
-                postMessage:   function() {{}},
-                disconnect:    function() {{}},
-                onMessage:     {{ addListener: function() {{}}, removeListener: function() {{}} }},
-                onDisconnect:  {{ addListener: function() {{}}, removeListener: function() {{}} }},
-            }};
-        }}),
-        sendMessage: makeNativeFunction('sendMessage', function() {{}}),
-        id:           undefined,
-        lastError:    undefined,
-    }};
 
     window.chrome = {{
         app: {{
@@ -220,8 +217,6 @@ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ra
             getIsInstalled:  makeNativeFunction('getIsInstalled', function() {{ return false; }}),
             runningState:    makeNativeFunction('runningState', function() {{ return 'cannot_run'; }}),
         }},
-        webstore: chromeWebstore,
-        runtime:  chromeRuntime,
         loadTimes: makeNativeFunction('loadTimes', function() {{
             return {{
                 requestTime: Date.now() / 1000 - Math.random() * 2,
@@ -330,28 +325,12 @@ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ra
     window.Worker.prototype = _origWorker.prototype;
 }})();
 
-// ── 8 & 8b. Canvas 噪声（修复1b: frame-aware seed）───────────────
-// 根本原因：5个 canvas（主页面 + 4个 iframe）画的内容完全相同，
-//           固定 seed 扰动后结果也完全相同，hash 一致。
-// 修复方案：在 JS 层用 location.href 对 base seed 做混入，
-//           每个 frame 的 href 不同（主页面 vs about:srcdoc vs blob: 等），
-//           产生不同的 _frameShift，让各 frame getImageData 扰动量不同，
-//           从而 canvas hash 不同，符合真实浏览器表现。
+// ── 8. Canvas 噪声（统一 seed，所有 frame hash 一致）────────────
+// 实测真实Chrome：5个canvas（主页面+iframe）hash 全部一致，这才是正常表现
+// 之前的 frame-aware 让主页面≠iframe，反而是异常特征
+// 现在改回统一 _noiseShift，所有 frame 扰动相同，hash 一致
 (function() {{
-    // base seed 由 Python 层固定（整个 session 唯一）
-    const _baseSeed = {canvas_noise_int};
-    const _baseNoise = {canvas_noise};
-
-    // 计算 frame 专属偏移：用 location.href 哈希混入
-    const _frameStr = (typeof location !== 'undefined' ? location.href : 'unknown') +
-                      (typeof self !== 'undefined' && self !== window ? '_worker' : '_main');
-    let _frameHash = 0;
-    for (let i = 0; i < _frameStr.length; i++) {{
-        _frameHash = ((_frameHash << 5) - _frameHash + _frameStr.charCodeAt(i)) & 0x7FFFFFFF;
-    }}
-    // _noiseShift: 1~15 之间，不同 frame 值不同，保证至少为 1
-    const _noiseShift = (_baseSeed + (_frameHash % 13) + 1) & 0xFF || 1;
-    // _shift: 用于 toDataURL base64 扰动
+    const _noiseShift = {canvas_noise_int};  // 固定 per-session，所有 frame 相同
     const _shift = (_noiseShift % 10) + 1;
 
     // ── toDataURL 扰动 ──────────────────────────────────────────
@@ -402,9 +381,7 @@ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ra
         }};
     }}
 
-    // ── getImageData 扰动（frame-aware）──────────────────────────
-    // 检测工具用 getImageData 遍历像素算 hash，必须在这里扰动
-    // 不同 frame 的 _noiseShift 不同，hash 自然不同
+    // ── getImageData 扰动（统一，所有 frame 相同）────────────────
     const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {{
         const imageData = _origGetImageData.call(this, x, y, w, h);
@@ -419,7 +396,6 @@ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ra
                 }}
             }}
             if (!found) {{
-                // 空白 canvas：直接改第一个字节，视觉无影响但 hash 改变
                 data[0] = _noiseShift & 0xFF;
             }}
         }}
@@ -441,6 +417,31 @@ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_pixel_ra
         }}
         return devices;
     }};
+}})();
+
+// ── 10. navigator.connection（Network Information API）───────────
+// 真实Chrome有此属性，effectiveType通常为'4g'或'3g'
+// Playwright默认不注入，navigator.connection为undefined是自动化特征
+(function() {{
+    const _types = ['4g', '3g'];
+    const _type = _types[{canvas_noise_int} % 2];  // 用session seed随机选，保持一致性
+    const _conn = {{
+        effectiveType: _type,
+        rtt: _type === '4g' ? 50 : 100,
+        downlink: _type === '4g' ? 10 : 1.5,
+        saveData: false,
+        type: 'wifi',
+        onchange: null,
+        addEventListener: function() {{}},
+        removeEventListener: function() {{}},
+        dispatchEvent: function() {{ return true; }},
+    }};
+    try {{
+        Object.defineProperty(navigator, 'connection', {{
+            get: () => _conn,
+            configurable: true,
+        }});
+    }} catch(e) {{}}
 }})();
 
 // ── 10. 清除自动化特征 ───────────────────────────────────────────
@@ -498,6 +499,8 @@ def _get_launch_args(screen_width: int, screen_height: int) -> list:
     """
     viewport_height = screen_height - 80
     return [
+        "--incognito",
+        '--enable-features=WebAssembly',
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
         '--disable-dev-shm-usage',
@@ -522,33 +525,97 @@ def _get_launch_args(screen_width: int, screen_height: int) -> list:
 def _build_context(p, fingerprint: dict, proxy_settings, headless: bool):
     """
     创建 browser + context + 注入脚本。
+    用 subprocess 启动 Chromium（不带 --enable-automation），
+    然后 Playwright 通过 connect_over_cdp 连接。
     """
-    launch_args = _get_launch_args(fingerprint['screen_width'], fingerprint['screen_height'])
-
-    browser = p.chromium.launch(headless=headless, args=launch_args)
-
+    import tempfile
     viewport_height = fingerprint['screen_height'] - 80
+    port = _find_free_port()
+    chromium_path = p.chromium.executable_path
+    user_data_dir = tempfile.mkdtemp(prefix='pw_chrome_')
 
-    context = browser.new_context(
-        user_agent=fingerprint['user_agent'],
-        locale=fingerprint['locale'],
-        timezone_id=fingerprint['timezone_id'],
-        proxy=proxy_settings,
-        viewport={
-            "width":  fingerprint['screen_width'],
-            "height": viewport_height,
-        },
-        screen={
-            "width":  fingerprint['screen_width'],
-            "height": fingerprint['screen_height'],
-        },
-        device_scale_factor=fingerprint['device_pixel_ratio'],
+    # 最小化启动参数，不加 --enable-automation
+    cmd = [
+        chromium_path,
+        f'--remote-debugging-port={port}',
+        f'--user-data-dir={user_data_dir}',
+        '--disable-blink-features=AutomationControlled',
+        '--no-first-run',
+        '--no-default-browser-check',
+        f'--window-size={fingerprint["screen_width"]},{viewport_height}',
+        '--force-color-profile=srgb',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-ipc-flooding-protection',
+        'about:blank',
+    ]
+    if headless:
+        cmd.append('--headless=new')
+    if proxy_settings:
+        cmd.append(f'--proxy-server={proxy_settings["server"]}')
+
+    # 启动 Chromium 进程
+    chrome_process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
+    # 等待 CDP 端口就绪
+    connected = False
+    for _ in range(50):
+        if chrome_process.poll() is not None:
+            raise RuntimeError(f"Chrome 进程启动失败，退出码: {chrome_process.returncode}")
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect(('127.0.0.1', port))
+                connected = True
+                break
+        except (ConnectionRefusedError, socket.timeout):
+            time.sleep(0.3)
+
+    if not connected:
+        chrome_process.terminate()
+        raise RuntimeError("CDP 端口未就绪，启动超时")
+
+    # 再等一下确保 HTTP 服务完全就绪
+    time.sleep(1)
+
+    # 连接
+    browser = p.chromium.connect_over_cdp(f'http://127.0.0.1:{port}')
+    context = browser.contexts[0]
+
+    # 通过 CDP 设置 user-agent / 时区 / 设备指标
+    page = context.pages[0] if context.pages else context.new_page()
+    cdp = context.new_cdp_session(page)
+    cdp.send('Emulation.setUserAgentOverride', {
+        'userAgent': fingerprint['user_agent'],
+        'platform': fingerprint['platform'],
+        'acceptLanguage': ','.join(fingerprint['languages']),
+    })
+    cdp.send('Emulation.setTimezoneOverride', {
+        'timezoneId': fingerprint['timezone_id'],
+    })
+    cdp.send('Emulation.setDeviceMetricsOverride', {
+        'width': fingerprint['screen_width'],
+        'height': viewport_height,
+        'deviceScaleFactor': fingerprint['device_pixel_ratio'],
+        'mobile': False,
+        'screenWidth': fingerprint['screen_width'],
+        'screenHeight': fingerprint['screen_height'],
+    })
+    cdp.detach()
+
+    # 注入反检测脚本
     init_script = _build_init_script(fingerprint)
     context.add_init_script(init_script)
 
-    page = context.new_page()
+    # 保存进程引用和临时目录以便后续清理
+    browser._chrome_process = chrome_process
+    browser._user_data_dir = user_data_dir
+
     return browser, context, page
 
 
@@ -574,6 +641,7 @@ def warmup_cache(proxy_config=None, headless=True):
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(MASTER_CACHE_DIR),
             headless=headless,
+            channel="chrome",
             args=launch_args,
             proxy=proxy_settings,
             user_agent=fingerprint['user_agent'],
@@ -596,7 +664,7 @@ def warmup_cache(proxy_config=None, headless=True):
             page.on("response", _on_response)
             for url in [
                 "https://accounts.binance.com/zh-CN/login",
-                "https://www.binance.com/zh-CN/register",
+                "https://accounts.binance.com/zh-CN/register",
             ]:
                 print(f"访问: {url}")
                 try:
@@ -736,6 +804,15 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
         print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（完整反检测）")
         browser, context, page = _build_context(p, fingerprint, proxy_settings, headless)
 
+        # ── 修复: 初始化缓存（之前只在 warmup_cache 里初始化，register_account 里从未调用）
+        if config.get("cache", {}).get("enabled", False):
+            init_cache_manager(CACHE_DIR)
+            _init_worker_cache(worker_id)  # 从 master 缓存复制到 worker 目录
+            # 只在缓存启用时注册路由拦截（page.route 会启用 CDP Fetch.enable，是自动化特征）
+            page.route("**/*", _handle_route)
+            page.on("response", _on_response)
+            print(f"[Worker-{worker_id}] 缓存已启用")
+
         try:
             if mode == "register":
                 print(f"\n[Worker-{worker_id}] 模式: 注册")
@@ -817,5 +894,17 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
             print(f"[Worker-{worker_id}] 处理过程出错: {e}")
             return False
         finally:
+            if config.get("cache", {}).get("enabled", False):
+                _sync_new_cache_to_master(worker_id)  # 把新缓存文件同步回 master
             if browser:
+                chrome_proc = getattr(browser, '_chrome_process', None)
+                user_data_dir = getattr(browser, '_user_data_dir', None)
                 browser.close()
+                if chrome_proc:
+                    chrome_proc.terminate()
+                    try:
+                        chrome_proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        chrome_proc.kill()
+                if user_data_dir:
+                    shutil.rmtree(user_data_dir, ignore_errors=True)

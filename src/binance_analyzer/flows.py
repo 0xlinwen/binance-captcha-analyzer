@@ -1,3 +1,4 @@
+import math
 import random
 import time
 from datetime import datetime
@@ -26,6 +27,55 @@ MAX_TOTAL_ITERATIONS = 50
 MAX_URL_RETRIES = 10
 # MFA 最大重试次数
 MAX_MFA_RETRIES = 3
+
+
+def _bezier_mouse_move(page, x_end, y_end, duration_ms=None):
+    """
+    贝塞尔曲线鼠标移动，模拟真实人类轨迹。
+    从当前位置移动到 (x_end, y_end)，带随机弧度和变速。
+    """
+    # 获取当前鼠标位置（用 JS 追踪，fallback 到随机起点）
+    try:
+        pos = page.evaluate("() => ({x: window._mouseX || 0, y: window._mouseY || 0})")
+        x_start, y_start = pos["x"], pos["y"]
+        if x_start == 0 and y_start == 0:
+            x_start = random.randint(100, 500)
+            y_start = random.randint(100, 400)
+    except Exception:
+        x_start = random.randint(100, 500)
+        y_start = random.randint(100, 400)
+
+    dist = math.hypot(x_end - x_start, y_end - y_start)
+    if dist < 5:
+        return
+
+    if duration_ms is None:
+        duration_ms = random.randint(80, 250) + int(dist * random.uniform(0.4, 1.0))
+
+    # 随机控制点，制造弧线
+    cx = (x_start + x_end) / 2 + random.uniform(-120, 120)
+    cy = (y_start + y_end) / 2 + random.uniform(-120, 120)
+
+    steps = max(8, int(dist / random.uniform(6, 12)))
+    step_delay = duration_ms / steps / 1000  # 秒
+
+    for i in range(1, steps + 1):
+        t = i / steps
+        # 缓入缓出 ease
+        t_ease = t * t * (3 - 2 * t)
+        bx = (1 - t_ease) ** 2 * x_start + 2 * (1 - t_ease) * t_ease * cx + t_ease ** 2 * x_end
+        by = (1 - t_ease) ** 2 * y_start + 2 * (1 - t_ease) * t_ease * cy + t_ease ** 2 * y_end
+        # 加微小抖动
+        bx += random.uniform(-1.5, 1.5)
+        by += random.uniform(-1.5, 1.5)
+        page.mouse.move(bx, by)
+        time.sleep(step_delay * random.uniform(0.6, 1.4))
+
+    # 记录最终位置
+    try:
+        page.evaluate(f"() => {{ window._mouseX = {x_end}; window._mouseY = {y_end}; }}")
+    except Exception:
+        pass
 
 
 def setup_logger(email_addr):
@@ -784,17 +834,15 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
     imap_host = config["imap_host"]
     imap_port = config["imap_port"]
 
-    # 添加请求监控（调试风控）
+    # 添加请求监控（调试风控）—— 用事件监听，不用 route 拦截，避免与缓存路由冲突
     request_log = []
-    def log_request(route, request):
+    def log_request(request):
         if "binance.com" in request.url:
-            # 记录关键请求的详细信息
             req_info = {
                 "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                 "method": request.method,
                 "url": request.url[:100],
             }
-            # 对关键接口记录更多信息
             if any(keyword in request.url for keyword in ["precheck", "getCaptcha", "validateCaptcha", "bizCheck", "check/result"]):
                 req_info["full_url"] = request.url
                 req_info["headers"] = {
@@ -804,7 +852,6 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                     "clienttype": request.headers.get("clienttype", ""),
                 }
             request_log.append(req_info)
-        route.continue_()
 
     def log_response(response):
         if "binance.com" in response.url and response.status >= 400:
@@ -817,18 +864,19 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 pass
 
     def cleanup_listeners():
-        """清理页面事件监听器"""
+        """清理页面事件监听器（只移除自己注册的，不动 route）"""
         try:
-            page.unroute("**/*")
+            page.remove_listener("request", log_request)
+            page.remove_listener("response", log_response)
         except Exception:
             pass
 
-    page.route("**/*", log_request)
+    page.on("request", log_request)
     page.on("response", log_response)
 
     console_log(email_addr, "开始注册")
     logger.info("打开注册页面...")
-    if not goto_with_retry(page, "https://www.binance.com/zh-CN/register", page_timeout=page_timeout):
+    if not goto_with_retry(page, "https://accounts.binance.com/zh-CN/register", page_timeout=page_timeout):
         console_log(email_addr, "注册页面加载失败", "error")
         logger.error("注册页面加载失败")
         cleanup_listeners()
@@ -839,11 +887,11 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
         # 等待页面完全加载
         page.wait_for_timeout(random.randint(2000, 4000))
 
-        # 随机移动鼠标（模拟浏览页面）
+        # 随机移动鼠标（模拟浏览页面，贝塞尔曲线）
         for _ in range(random.randint(3, 6)):
             x = random.randint(200, 1000)
             y = random.randint(200, 700)
-            page.mouse.move(x, y, steps=random.randint(10, 20))
+            _bezier_mouse_move(page, x, y)
             page.wait_for_timeout(random.randint(300, 800))
 
         # 随机滚动页面
@@ -883,7 +931,11 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             return "other"
 
     for iteration in range(MAX_TOTAL_ITERATIONS):
-        page.wait_for_timeout(random.randint(1800, 2500))  # 随机等待，与旧版本一致
+        # 变速等待：基础随机 + 偶尔长停顿，避免固定节奏
+        base_wait = random.randint(1200, 3200)
+        if random.random() < 0.15:  # 15% 概率长停顿
+            base_wait += random.randint(1500, 4000)
+        page.wait_for_timeout(base_wait)
         url = page.url
         url_pattern = _get_url_pattern(url)
 
@@ -1125,13 +1177,12 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             logger.info("register - 输入邮箱")
             url_before = url
 
-            # 模拟真实用户行为：随机移动鼠标、停顿
+            # 模拟真实用户行为：贝塞尔曲线鼠标移动
             try:
-                # 随机移动鼠标到页面不同位置
                 for _ in range(random.randint(2, 4)):
                     x = random.randint(100, 800)
                     y = random.randint(100, 600)
-                    page.mouse.move(x, y)
+                    _bezier_mouse_move(page, x, y)
                     page.wait_for_timeout(random.randint(200, 500))
 
                 # 随机滚动页面

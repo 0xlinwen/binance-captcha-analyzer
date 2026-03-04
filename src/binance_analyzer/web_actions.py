@@ -2,10 +2,32 @@ import random
 import time
 import traceback
 import logging
+import sys
 
 from .utils import dismiss_global_modal
 
 logger = logging.getLogger(__name__)
+
+
+def _human_clear_input(element, page):
+    """用键盘操作清空输入框（全选+删除），避免 fill('') 的 JS 直接操作被检测"""
+    element.click()
+    time.sleep(random.uniform(0.05, 0.15))
+    mod = "Meta" if sys.platform == "darwin" else "Control"
+    page.keyboard.press(f"{mod}+a")
+    time.sleep(random.uniform(0.05, 0.1))
+    page.keyboard.press("Backspace")
+    time.sleep(random.uniform(0.05, 0.1))
+
+
+def _paste_text(page, text):
+    """模拟粘贴：通过 CDP Input.insertText 一次性插入文本
+
+    与 type() 逐字输入不同，insertText 一次性插入整段文本，
+    跟真人 Cmd+V 粘贴的效果一致，产生的事件 isTrusted=true。
+    """
+    page.keyboard.insert_text(text)
+    time.sleep(random.uniform(0.1, 0.2))
 
 
 def click_button(scope, texts):
@@ -85,9 +107,8 @@ def input_email(page, email_addr):
     if email_input:
         email_input.click()
         time.sleep(random.uniform(0.2, 0.4))
-        email_input.fill("")
-        time.sleep(random.uniform(0.1, 0.2))
-        email_input.type(email_addr, delay=random.randint(50, 100))
+        _human_clear_input(email_input, page)
+        _paste_text(page, email_addr)
         logger.info(f"输入邮箱: {email_addr}")
         return True
 
@@ -95,7 +116,8 @@ def input_email(page, email_addr):
     if inputs:
         inputs[0].click()
         time.sleep(random.uniform(0.2, 0.4))
-        inputs[0].type(email_addr, delay=random.randint(50, 100))
+        _human_clear_input(inputs[0], page)
+        _paste_text(page, email_addr)
         logger.info(f"使用兜底输入框输入邮箱: {email_addr}")
         return True
 
@@ -224,12 +246,10 @@ def input_password(page, password):
     if password_input:
         password_input.click()
         time.sleep(random.uniform(0.1, 0.2))
-        # 清空已有内容再输入
         current_value = password_input.input_value()
         if current_value:
-            password_input.fill("")
-            time.sleep(random.uniform(0.1, 0.2))
-        password_input.type(password, delay=random.randint(30, 80))
+            _human_clear_input(password_input, page)
+        _paste_text(page, password)
         logger.info("密码已输入")
         return True
     return False
