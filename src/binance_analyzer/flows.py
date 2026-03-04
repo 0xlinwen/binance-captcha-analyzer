@@ -149,6 +149,12 @@ RISK_SIGNATURES = [
     # IP 地区限制（美国等）
     "无法为该地区的用户提供服务",
     "200004431",
+    "300010",
+]
+
+# 临时性错误，点击"已知晓"后可重试，不算严重风控
+RETRIABLE_SIGNATURES = [
+    "300010",
 ]
 
 # IP 级别拦截，直接失败不重试
@@ -517,6 +523,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     except Exception:
                         pass
                     page.wait_for_timeout(random.randint(2500, 3500))
+                    continue
+                # 300010 等临时性错误，点击"已知晓"后继续
+                if any(sig in body_text for sig in RETRIABLE_SIGNATURES):
+                    console_log(email_addr, "临时错误，点击已知晓后继续", "warning")
+                    logger.warning("临时错误 (RETRIABLE)，继续重试")
+                    page.wait_for_timeout(random.randint(2000, 4000))
                     continue
         except Exception as e:
             msg = f"迭代 {iteration + 1} 异常: {e}"
@@ -987,6 +999,13 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 page.wait_for_timeout(random.randint(5000, 8000))
                 continue
 
+            # 300010 等临时性错误，点击"已知晓"后继续（不刷新页面）
+            if any(sig in body_text for sig in RETRIABLE_SIGNATURES):
+                console_log(email_addr, "临时错误，点击已知晓后继续", "warning")
+                logger.warning(f"临时错误 (RETRIABLE)，继续重试")
+                page.wait_for_timeout(random.randint(2000, 4000))
+                continue
+
             # 其他风控错误才返回失败
             console_log(email_addr, "检测到严重风控错误，停止注册", "error")
             logger.error("严重风控错误，停止注册")
@@ -1213,6 +1232,18 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
 
             # 等待URL变化（最多等待5秒）
             changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
+
+            # 检查 300010 等临时性错误弹窗，点击"已知晓"关闭后重试
+            try:
+                body_text = page.inner_text("body")
+                if any(sig in body_text for sig in RETRIABLE_SIGNATURES):
+                    console_log(email_addr, f"检测到临时错误弹窗，点击已知晓", "warning")
+                    logger.warning(f"检测到临时错误: {[s for s in RETRIABLE_SIGNATURES if s in body_text]}")
+                    _dismiss_error_popup(page, logger)
+                    page.wait_for_timeout(random.randint(2000, 4000))
+                    continue
+            except Exception:
+                pass
 
             # 单次验证码处理，让状态机的迭代循环来处理重试
             captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
