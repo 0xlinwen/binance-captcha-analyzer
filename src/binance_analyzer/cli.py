@@ -145,6 +145,24 @@ def main():
     success_file = output_dir / "success_accounts.txt"
     failed_file = output_dir / "failed_accounts.txt"
 
+    def _read_existing_emails(filepath):
+        """读取文件中已有的邮箱集合"""
+        emails = set()
+        if filepath.exists():
+            with open(filepath, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if ":" in line:
+                        emails.add(line.split(":")[0])
+        return emails
+
+    def _append_if_new(filepath, email_addr, password):
+        """账号不存在时才追加写入"""
+        existing = _read_existing_emails(filepath)
+        if email_addr not in existing:
+            with open(filepath, "a") as f:
+                f.write(f"{email_addr}:{password}\n")
+
     success_count = 0
     fail_count = 0
     already_registered_count = 0
@@ -163,24 +181,19 @@ def main():
                     email_addr, password, result = future.result()
                     if result is True:
                         success_count += 1
-                        with open(success_file, "a") as f:
-                            f.write(f"{email_addr}:{password}\n")
+                        _append_if_new(success_file, email_addr, password)
                     elif result == "already_registered":
                         already_registered_count += 1
-                        with open(success_file, "a") as f:
-                            f.write(f"{email_addr}:{password}\n")
+                        _append_if_new(success_file, email_addr, password)
                     elif result == "need_register":
                         need_register_count += 1
-                        with open(failed_file, "a") as f:
-                            f.write(f"{email_addr}:{password}\n")
+                        _append_if_new(failed_file, email_addr, password)
                     elif result == "imap_auth_failed":
                         imap_auth_failed_count += 1
-                        with open(failed_file, "a") as f:
-                            f.write(f"{email_addr}:{password}\n")
+                        _append_if_new(failed_file, email_addr, password)
                     else:
                         fail_count += 1
-                        with open(failed_file, "a") as f:
-                            f.write(f"{email_addr}:{password}\n")
+                        _append_if_new(failed_file, email_addr, password)
                     total = success_count + fail_count + already_registered_count + need_register_count + imap_auth_failed_count
                     status = f"进度: {total}/{len(accounts)} | 成功: {success_count} | 失败: {fail_count}"
                     if already_registered_count > 0:

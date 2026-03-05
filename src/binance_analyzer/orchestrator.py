@@ -525,11 +525,52 @@ def _get_launch_args(screen_width: int, screen_height: int) -> list:
 def _build_context(p, fingerprint: dict, proxy_settings, headless: bool):
     """
     创建 browser + context + 注入脚本。
-    用 subprocess 启动 Chromium（不带 --enable-automation），
-    然后 Playwright 通过 connect_over_cdp 连接。
+    - 无代理 / 无认证代理：subprocess 启动（不带 --enable-automation）
+    - 需认证代理：Playwright launch + new_context(proxy=...) 方式
     """
-    import tempfile
     viewport_height = fingerprint['screen_height'] - 80
+
+    # 需要认证的代理走 Playwright launch 方式
+    needs_auth = proxy_settings and proxy_settings.get("username")
+    if needs_auth:
+        browser, context, page = _build_context_playwright(
+            p, fingerprint, proxy_settings, headless, viewport_height
+        )
+    else:
+        browser, context, page = _build_context_subprocess(
+            p, fingerprint, proxy_settings, headless, viewport_height
+        )
+
+    # 注入反检测脚本
+    init_script = _build_init_script(fingerprint)
+    context.add_init_script(init_script)
+
+    return browser, context, page
+
+
+def _build_context_playwright(p, fingerprint, proxy_settings, headless, viewport_height):
+    """Playwright launch 方式，支持代理认证。"""
+    launch_args = _get_launch_args(fingerprint['screen_width'], fingerprint['screen_height'])
+    browser = p.chromium.launch(
+        headless=headless,
+        args=launch_args,
+    )
+    context = browser.new_context(
+        proxy=proxy_settings,
+        user_agent=fingerprint['user_agent'],
+        locale=fingerprint['locale'],
+        timezone_id=fingerprint['timezone_id'],
+        viewport={'width': fingerprint['screen_width'], 'height': viewport_height},
+        screen={'width': fingerprint['screen_width'], 'height': fingerprint['screen_height']},
+        device_scale_factor=fingerprint['device_pixel_ratio'],
+    )
+    page = context.new_page()
+    return browser, context, page
+
+
+def _build_context_subprocess(p, fingerprint, proxy_settings, headless, viewport_height):
+    """subprocess 启动 Chromium，不带 --enable-automation。"""
+    import tempfile
     port = _find_free_port()
     chromium_path = p.chromium.executable_path
     user_data_dir = tempfile.mkdtemp(prefix='pw_chrome_')
@@ -607,10 +648,6 @@ def _build_context(p, fingerprint: dict, proxy_settings, headless: bool):
         'screenHeight': fingerprint['screen_height'],
     })
     cdp.detach()
-
-    # 注入反检测脚本
-    init_script = _build_init_script(fingerprint)
-    context.add_init_script(init_script)
 
     # 保存进程引用和临时目录以便后续清理
     browser._chrome_process = chrome_process
