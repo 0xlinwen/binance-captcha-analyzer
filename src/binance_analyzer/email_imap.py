@@ -310,6 +310,7 @@ def get_email_verification_code(
     timeout=IMAP_FETCH_TIMEOUT_SEC,
     initial_count=0,
     consumed_codes=None,
+    should_abort=None,
 ):
     """
     获取邮件验证码
@@ -330,6 +331,11 @@ def get_email_verification_code(
 
     start_time = time.time()
     while time.time() - start_time < timeout:
+        # 检查外部是否要求中止（如页面 URL 已变化）
+        if should_abort and should_abort():
+            logger.info("外部中止信号，停止等待邮件验证码")
+            return "aborted"
+
         try:
             with imap_connection(imap_host, imap_port, username, password) as mail:
                 auth_fail_count = 0
@@ -542,7 +548,11 @@ def handle_email_verification(
         timeout=90,
         initial_count=initial_count,
         consumed_codes=consumed_codes,
+        should_abort=_check_url_redirect,
     )
+    if email_code == "aborted":
+        logger.info("等待邮件期间页面 URL 变化，退出邮件验证流程")
+        return "url_changed"
     if email_code == "imap_auth_failed":
         return "imap_auth_failed"
     if not email_code:
