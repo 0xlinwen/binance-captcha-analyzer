@@ -235,6 +235,117 @@ def _has_risk_error(page, logger=None):
         return False, ""
 
 
+def _tick_agreement_checkbox(page, email_addr=None, logger=None):
+    """
+    勾选注册页面的"创建账户即表示您同意币安"复选框。
+    币安用自定义组件，复选框是文字左侧的方框图标。
+    """
+    try:
+        # 方法1: 直接用 JS 找到复选框方框并点击
+        # 币安的复选框通常是文字旁边的一个小方框（div/span/svg），在包含"创建账户"文字的行内
+        clicked = page.evaluate("""() => {
+            // 找包含关键文字的元素
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let textNode = null;
+            while (walker.nextNode()) {
+                if (walker.currentNode.textContent.includes('创建账户即表示') ||
+                    walker.currentNode.textContent.includes('创建个人账户即表示')) {
+                    textNode = walker.currentNode;
+                    break;
+                }
+            }
+            if (!textNode) return 'not_found';
+
+            // 从文字节点向上找到行容器
+            let row = textNode.parentElement;
+            for (let i = 0; i < 8 && row; i++) {
+                // 在这个容器里找 input[type=checkbox]
+                const cb = row.querySelector('input[type="checkbox"]');
+                if (cb) {
+                    // 点击 checkbox 本身
+                    cb.click();
+                    if (cb.checked) return 'input_checked';
+                    // 如果 click 没生效，尝试 dispatchEvent
+                    cb.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                    return 'input_dispatched';
+                }
+                // 找 role=checkbox 的元素
+                const roleBox = row.querySelector('[role="checkbox"]');
+                if (roleBox) {
+                    roleBox.click();
+                    return 'role_checkbox';
+                }
+                row = row.parentElement;
+            }
+            return 'no_checkbox_in_row';
+        }""")
+
+        if logger:
+            logger.info(f"JS 勾选结果: {clicked}")
+
+        if clicked and clicked not in ('not_found', 'no_checkbox_in_row'):
+            if email_addr:
+                console_log(email_addr, "勾选创建账户协议")
+            page.wait_for_timeout(random.randint(300, 500))
+            return True
+
+        # 方法2: Playwright locator 点击复选框左侧的方框
+        # 币安页面上复选框方框通常在文字的前一个兄弟元素
+        checkbox_selectors = [
+            "input[type='checkbox']",
+            "[role='checkbox']",
+            # 匹配 checkbox 容器 class
+            "[class*='bn-checkbox']",
+            "[class*='BnCheckbox']",
+            "[class*='check-box']",
+            "[class*='CheckBox']",
+        ]
+        for selector in checkbox_selectors:
+            try:
+                els = page.query_selector_all(selector)
+                for el in els:
+                    if el.is_visible():
+                        el.click()
+                        if logger:
+                            logger.info(f"Playwright 点击复选框: {selector}")
+                        if email_addr:
+                            console_log(email_addr, "勾选创建账户协议")
+                        page.wait_for_timeout(random.randint(300, 500))
+                        return True
+            except Exception:
+                continue
+
+        # 方法3: 用坐标点击——找到"创建账户"文字，点击其左侧的方框位置
+        try:
+            text_el = page.query_selector("text=创建账户即表示")
+            if not text_el:
+                text_el = page.query_selector("text=创建个人账户即表示")
+            if text_el:
+                box = text_el.bounding_box()
+                if box:
+                    # 方框在文字左侧，大约 x - 30 的位置，y 居中
+                    click_x = box['x'] - 20
+                    click_y = box['y'] + box['height'] / 2
+                    page.mouse.click(click_x, click_y)
+                    if logger:
+                        logger.info(f"坐标点击复选框: ({click_x:.0f}, {click_y:.0f})")
+                    if email_addr:
+                        console_log(email_addr, "勾选创建账户协议")
+                    page.wait_for_timeout(random.randint(300, 500))
+                    return True
+        except Exception as e:
+            if logger:
+                logger.info(f"坐标点击异常: {e}")
+
+        if logger:
+            logger.warning("未找到协议复选框")
+        return False
+    except Exception as e:
+        if logger:
+            logger.info(f"勾选复选框异常: {e}")
+        return False
+
+
 def _dismiss_error_popup(page, logger=None):
     """检查并点击"已知晓"等弹窗按钮"""
     dismiss_btns = [
@@ -1081,7 +1192,25 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             console_log(email_addr, "set-password: 输入密码")
             logger.info("set-password - 输入密码")
             url_before = url
-            input_password(page, email_password)
+
+            # 等待页面稳定，避免导航中 context 被销毁
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            page.wait_for_timeout(random.randint(800, 1500))
+
+            try:
+                input_password(page, email_password)
+            except Exception as e:
+                logger.warning(f"输入密码异常: {e}，等待页面稳定后重试")
+                page.wait_for_timeout(2000)
+                try:
+                    input_password(page, email_password)
+                except Exception as e2:
+                    logger.error(f"重试输入密码仍失败: {e2}")
+                    continue
+
             page.wait_for_timeout(random.randint(400, 600))
             click_button(page, ["继续", "Continue", "下一步", "Next"])
 
@@ -1214,14 +1343,8 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             input_email(page, email_addr)
             page.wait_for_timeout(random.randint(400, 600))
 
-            try:
-                checkbox = page.query_selector("input[type='checkbox']")
-                if checkbox and not checkbox.is_checked():
-                    checkbox.click()
-                    console_log(email_addr, "勾选创建账户")
-                    logger.info("勾选了创建账户复选框")
-            except Exception:
-                pass
+            # 勾选"创建账户即表示您同意币安"复选框
+            _tick_agreement_checkbox(page, email_addr, logger)
 
             page.wait_for_timeout(random.randint(400, 600))
             initial_mail_count = get_initial_mail_count(imap_host, imap_port, email_addr, email_password)
@@ -1233,6 +1356,19 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
 
             # 等待URL变化（最多等待5秒）
             changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
+
+            # 检查是否因未勾选协议而被拦截
+            try:
+                body_text = page.inner_text("body")
+                if "您需同意" in body_text or "需同意" in body_text or "agree to" in body_text.lower():
+                    console_log(email_addr, "未勾选协议，重新勾选", "warning")
+                    logger.warning("检测到未勾选协议提示，重新勾选")
+                    _tick_agreement_checkbox(page, email_addr, logger)
+                    page.wait_for_timeout(random.randint(500, 800))
+                    click_button(page, ["继续", "Continue", "下一步", "Next"])
+                    changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
+            except Exception:
+                pass
 
             # 检查 300010 等临时性错误弹窗，点击"已知晓"关闭后重试
             try:
