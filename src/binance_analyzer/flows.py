@@ -434,14 +434,17 @@ def _wait_for_page_response(page, url_before, timeout_ms=5000, logger=None):
         - response_type: "url_changed" / "captcha" / "timeout"
         - new_url: 当前URL
     """
-    # 验证码弹窗选择器
+    # 验证码弹窗选择器（含 Binance 专用）
     captcha_selectors = [
+        ".bcapc-popup",
+        ".bcap-popup",
+        ".bcap-modal",
+        ".bs-modal",
         "#captcha-popup",
         "[class*='captcha']",
         "iframe[src*='captcha']",
         "[data-testid='captcha']",
-        ".bds-modal",  # Binance modal
-        "[class*='Modal'][class*='captcha']",
+        ".bds-modal",
     ]
 
     try:
@@ -1214,11 +1217,17 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             page.wait_for_timeout(random.randint(400, 600))
             click_button(page, ["继续", "Continue", "下一步", "Next"])
 
-            # 等待URL变化（最多等待3秒）
-            changed, url = _wait_for_url_change(page, url_before, timeout_ms=3000, logger=logger)
+            # 等待页面响应（URL变化 或 验证码弹窗）
+            response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
+            logger.info(f"密码页点击继续后响应类型: {response_type}")
 
-            # 单次验证码处理，让状态机的迭代循环来处理重试
-            captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+            # 验证码弹窗 → 直接处理
+            if response_type == "captcha":
+                captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+            else:
+                # URL变化或超时，也检测一次验证码（可能延迟弹出）
+                captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+
             should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
                 captcha_result, captcha_fail_count, email_addr, logger
             )
@@ -1226,7 +1235,6 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 cleanup_listeners()
                 return stop_reason
             if captcha_result is False:
-                # 验证码失败后增加冷却时间
                 cooldown = random.randint(8000, 15000)
                 console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
                 page.wait_for_timeout(cooldown)
@@ -1354,49 +1362,83 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 return "imap_auth_failed"
             click_button(page, ["继续", "Continue", "下一步", "Next"])
 
-            # 等待URL变化（最多等待5秒）
-            changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
+            # 等待页面响应（URL变化 或 验证码弹窗）
+            response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
+            logger.info(f"注册页点击继续后响应类型: {response_type}")
 
-            # 检查是否因未勾选协议而被拦截
-            try:
-                body_text = page.inner_text("body")
-                if "您需同意" in body_text or "需同意" in body_text or "agree to" in body_text.lower():
-                    console_log(email_addr, "未勾选协议，重新勾选", "warning")
-                    logger.warning("检测到未勾选协议提示，重新勾选")
-                    _tick_agreement_checkbox(page, email_addr, logger)
-                    page.wait_for_timeout(random.randint(500, 800))
-                    click_button(page, ["继续", "Continue", "下一步", "Next"])
-                    changed, url = _wait_for_url_change(page, url_before, timeout_ms=5000, logger=logger)
-            except Exception:
-                pass
+            # 验证码弹窗出现 → 直接处理验证码，不做其他操作
+            if response_type == "captcha":
+                captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+                should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                    captcha_result, captcha_fail_count, email_addr, logger
+                )
+                if should_stop:
+                    cleanup_listeners()
+                    return stop_reason
+                if captcha_result is False:
+                    cooldown = random.randint(8000, 15000)
+                    console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
+                    page.wait_for_timeout(cooldown)
+                # 验证码处理后等待URL变化
+                changed, url_after = _wait_for_url_change(page, url, timeout_ms=10000, logger=logger)
+                url = url_after
+                continue
 
-            # 检查 300010 等临时性错误弹窗，点击"已知晓"关闭后重试
-            try:
-                body_text = page.inner_text("body")
-                if any(sig in body_text for sig in RETRIABLE_SIGNATURES):
-                    console_log(email_addr, f"检测到临时错误弹窗，点击已知晓", "warning")
-                    logger.warning(f"检测到临时错误: {[s for s in RETRIABLE_SIGNATURES if s in body_text]}")
-                    _dismiss_error_popup(page, logger)
-                    page.wait_for_timeout(random.randint(2000, 4000))
-                    continue
-            except Exception:
-                pass
+            # URL 未变化 → 检查是否因未勾选协议而被拦截
+            if response_type == "timeout":
+                try:
+                    body_text = page.inner_text("body")
+                    if "您需同意" in body_text or "需同意" in body_text or "agree to" in body_text.lower():
+                        console_log(email_addr, "未勾选协议，重新勾选", "warning")
+                        logger.warning("检测到未勾选协议提示，重新勾选")
+                        _tick_agreement_checkbox(page, email_addr, logger)
+                        page.wait_for_timeout(random.randint(500, 800))
+                        click_button(page, ["继续", "Continue", "下一步", "Next"])
+                        response_type2, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
+                        if response_type2 == "captcha":
+                            captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+                            should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                                captcha_result, captcha_fail_count, email_addr, logger
+                            )
+                            if should_stop:
+                                cleanup_listeners()
+                                return stop_reason
+                            if captcha_result is False:
+                                cooldown = random.randint(8000, 15000)
+                                console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
+                                page.wait_for_timeout(cooldown)
+                            changed, url_after = _wait_for_url_change(page, url, timeout_ms=10000, logger=logger)
+                            url = url_after
+                            continue
+                except Exception:
+                    pass
 
-            # 单次验证码处理，让状态机的迭代循环来处理重试
-            captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
-            should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
-                captcha_result, captcha_fail_count, email_addr, logger
-            )
-            if should_stop:
-                cleanup_listeners()
-                return stop_reason
-            if captcha_result is False:
-                # 验证码失败后增加冷却时间
-                cooldown = random.randint(8000, 15000)
-                console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
-                page.wait_for_timeout(cooldown)
+                # 检查 300010 等临时性错误弹窗
+                try:
+                    body_text = page.inner_text("body")
+                    if any(sig in body_text for sig in RETRIABLE_SIGNATURES):
+                        console_log(email_addr, "检测到临时错误弹窗，点击已知晓", "warning")
+                        logger.warning(f"检测到临时错误: {[s for s in RETRIABLE_SIGNATURES if s in body_text]}")
+                        _dismiss_error_popup(page, logger)
+                        page.wait_for_timeout(random.randint(2000, 4000))
+                        continue
+                except Exception:
+                    pass
 
-            # 验证码处理后等待URL变化（增加到10秒）
+                # 超时但无特殊情况，尝试一次验证码检测（可能弹窗延迟出现）
+                captcha_result = solve_captcha_if_present(page, api_key, model, email_addr)
+                should_stop, captcha_fail_count, stop_reason = _handle_captcha_result(
+                    captcha_result, captcha_fail_count, email_addr, logger
+                )
+                if should_stop:
+                    cleanup_listeners()
+                    return stop_reason
+                if captcha_result is False:
+                    cooldown = random.randint(8000, 15000)
+                    console_log(email_addr, f"验证码失败，冷却 {cooldown/1000:.1f}秒", "warning")
+                    page.wait_for_timeout(cooldown)
+
+            # URL 已变化或验证码处理完毕，等待最终跳转
             changed, url_after = _wait_for_url_change(page, url, timeout_ms=10000, logger=logger)
             if captcha_result is True and "/register" in url_after and "/register/" not in url_after:
                 console_log(email_addr, "验证码通过但页面未跳转，检查是否风控", "warning")

@@ -15,6 +15,7 @@ from .constants import (
     IMAP_FETCH_TIMEOUT_SEC,
 )
 from .utils import retry_with_backoff
+from .web_actions import _human_clear_input
 from .exceptions import (
     IMAPAuthFailed,
     IMAPConnectionError,
@@ -98,7 +99,7 @@ def _extract_code_from_api_text(text: str) -> str | None:
     return _extract_6digit_code(text)
 
 
-def _fetch_outlook_code_via_api(email_addr: str, email_password: str, timeout=60, poll_interval=5):
+def _fetch_outlook_code_via_api(email_addr: str, email_password: str, timeout=60, poll_interval=5, should_abort=None):
     """使用外部 API 拉取 outlook 邮箱验证码。"""
     PERMANENT_FAIL_KEYWORDS = [
         "邮箱信息不存在",
@@ -113,6 +114,11 @@ def _fetch_outlook_code_via_api(email_addr: str, email_password: str, timeout=60
     max_permanent_fails = 3
 
     while time.time() - start_time < timeout:
+        # 检查外部是否要求中止（如页面 URL 已变化）
+        if should_abort and should_abort():
+            logger.info(f"[{email_addr}] 外部中止信号，停止等待 Outlook 验证码")
+            return "aborted"
+
         print(f"[{email_addr}] 请求邮件 ...")
         try:
             resp = requests.get(
@@ -234,6 +240,64 @@ def get_initial_mail_count(imap_host, imap_port, email_addr, email_password):
         return 0
 
 
+def get_latest_binance_mail_timestamp(imap_host, imap_port, email_addr, email_password):
+    """
+    获取最新一封币安邮件的时间戳
+
+    Returns:
+        时间戳(float)，没有币安邮件返回 0，失败返回 0 或 "imap_auth_failed"
+    """
+    if _is_outlook_address(email_addr):
+        # Outlook API 模式下返回当前时间，确保只获取之后的邮件
+        return time.time()
+
+    def _get_timestamp():
+        with imap_connection(imap_host, imap_port, email_addr, email_password) as mail:
+            mail.select("INBOX")
+            _, messages = mail.search(None, "ALL")
+            if not messages[0]:
+                return 0
+
+            mail_ids = messages[0].split()
+            # 从最新的邮件开始查找币安邮件
+            for mail_id in reversed(mail_ids[-20:]):
+                _, msg_data = mail.fetch(mail_id, "(RFC822)")
+                for response_part in msg_data:
+                    if not isinstance(response_part, tuple):
+                        continue
+                    msg = email.message_from_bytes(response_part[1])
+                    from_addr = msg.get("From", "").lower()
+                    if "binance" in from_addr:
+                        # 获取邮件日期
+                        date_str = msg.get("Date", "")
+                        if date_str:
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                dt = parsedate_to_datetime(date_str)
+                                ts = dt.timestamp()
+                                logger.info(f"最新币安邮件时间戳: {ts} ({date_str})")
+                                return ts
+                            except Exception:
+                                pass
+                        # 如果无法解析日期，返回当前时间
+                        return time.time()
+            return 0
+
+    try:
+        return retry_with_backoff(
+            _get_timestamp,
+            max_retries=IMAP_RETRY_COUNT,
+            logger=logger,
+            operation_name="获取最新邮件时间戳"
+        )
+    except IMAPAuthFailed as e:
+        logger.error(f"IMAP 认证失败: {e}")
+        return "imap_auth_failed"
+    except Exception as e:
+        logger.error(f"获取最新邮件时间戳失败: {e}")
+        return 0
+
+
 def _extract_code_from_message(msg):
     """从 IMAP 邮件对象中提取验证码"""
     body = ""
@@ -311,19 +375,23 @@ def get_email_verification_code(
     initial_count=0,
     consumed_codes=None,
     should_abort=None,
+    min_timestamp=0,
 ):
     """
     获取邮件验证码
+
+    Args:
+        min_timestamp: 最小时间戳，只接受比这个时间戳更新的邮件
 
     Returns:
         验证码字符串，失败返回 None 或 "imap_auth_failed"
     """
     if _is_outlook_address(username):
         logger.info(f"[{username}] 使用 Outlook API 获取验证码")
-        return _fetch_outlook_code_via_api(username, password, timeout=timeout, poll_interval=5)
+        return _fetch_outlook_code_via_api(username, password, timeout=timeout, poll_interval=5, should_abort=should_abort)
 
     logger.info(f"连接 IMAP: {imap_host}:{imap_port}, 用户: {username}")
-    logger.info(f"等待新邮件 (初始邮件数: {initial_count})...")
+    logger.info(f"等待新邮件 (初始邮件数: {initial_count}, 最小时间戳: {min_timestamp})...")
     consumed_codes = consumed_codes if consumed_codes is not None else set()
 
     auth_fail_count = 0
@@ -363,6 +431,20 @@ def get_email_verification_code(
                         from_addr = msg.get("From", "").lower()
                         if "binance" not in from_addr:
                             continue
+
+                        # 检查邮件时间戳是否比 min_timestamp 更新
+                        if min_timestamp > 0:
+                            date_str = msg.get("Date", "")
+                            if date_str:
+                                try:
+                                    from email.utils import parsedate_to_datetime
+                                    dt = parsedate_to_datetime(date_str)
+                                    mail_ts = dt.timestamp()
+                                    if mail_ts <= min_timestamp:
+                                        logger.debug(f"跳过旧邮件 (时间戳: {mail_ts} <= {min_timestamp})")
+                                        continue
+                                except Exception:
+                                    pass
 
                         code = _extract_code_from_message(msg)
                         if code and code not in consumed_codes:
@@ -404,8 +486,14 @@ def handle_email_verification(
     initial_url = page.url
 
     def _check_url_redirect():
+        """检测页面是否已跳转离开验证码页面（成功或失败）"""
         try:
             current_url = page.url
+            # 成功跳转：进入 stay-signed-in 或用户中心
+            if "/login/stay-signed-in" in current_url or "/my/" in current_url or "authcenter" in current_url:
+                logger.info(f"[URL变化] 验证成功，页面已跳转: {current_url}")
+                return True
+            # 检测是否离开了预期的验证码页面
             if expected_url_pattern and expected_url_pattern not in current_url:
                 logger.info(f"[URL变化] 页面已跳转: {current_url}")
                 return True
@@ -518,6 +606,7 @@ def handle_email_verification(
         return None, None
 
     code_input = None
+    min_timestamp = 0
     for retry in range(10):
         if _check_url_redirect():
             logger.info("检测到页面跳转，退出邮件验证流程")
@@ -526,6 +615,13 @@ def handle_email_verification(
         _dismiss_auth_error_popup()
 
         if retry == 0:
+            # 在点击获取验证码按钮前，记录当前最新邮件的时间戳
+            min_timestamp = get_latest_binance_mail_timestamp(
+                imap_host, imap_port, email_addr, email_password
+            )
+            if min_timestamp == "imap_auth_failed":
+                return "imap_auth_failed"
+            logger.info(f"记录当前最新邮件时间戳: {min_timestamp}")
             _click_get_code_button()
 
         code_input, _ = _find_code_input()
@@ -549,6 +645,7 @@ def handle_email_verification(
         initial_count=initial_count,
         consumed_codes=consumed_codes,
         should_abort=_check_url_redirect,
+        min_timestamp=min_timestamp,
     )
     if email_code == "aborted":
         logger.info("等待邮件期间页面 URL 变化，退出邮件验证流程")
@@ -580,6 +677,8 @@ def handle_email_verification(
     logger.info(f"输入验证码: {email_code}")
     code_input.click()
     time.sleep(random.uniform(0.1, 0.2))
+    # 先清空输入框，避免重新获取验证码时旧内容残留
+    _human_clear_input(code_input, page)
     code_input.type(email_code, delay=random.randint(40, 80))
     page.wait_for_timeout(900)
 
