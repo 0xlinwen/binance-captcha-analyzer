@@ -9,7 +9,13 @@ def load_accounts(base_dir: Path, accounts_file: str):
     with open(accounts_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line and ":" in line:
+            if not line:
+                continue
+            # 支持两种分隔符格式: ---- 和 :
+            if "----" in line:
+                email_addr, password = line.split("----", 1)
+                accounts.append((email_addr.strip(), password.strip()))
+            elif ":" in line:
                 email_addr, password = line.split(":", 1)
                 accounts.append((email_addr.strip(), password.strip()))
     return accounts
