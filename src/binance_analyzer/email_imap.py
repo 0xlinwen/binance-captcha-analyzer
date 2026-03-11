@@ -687,10 +687,18 @@ def handle_email_verification(
             page.wait_for_timeout(500)
             _dismiss_auth_error_popup()
             if _submit_mfa(page):
-                return True
-        return False
+                break
+        else:
+            return False
 
-    page.wait_for_timeout(1000)
+    # 等待页面响应
+    page.wait_for_timeout(1500)
+
+    # 检查是否已跳转到成功页面
+    if _check_url_redirect():
+        logger.info("验证码提交后页面已跳转，验证成功")
+        return "url_changed"
+
     if _dismiss_auth_error_popup():
         return False
 

@@ -81,26 +81,23 @@ def _bezier_mouse_move(page, x_end, y_end, duration_ms=None):
 def setup_logger(email_addr):
     """为每个账号设置日志（使用统一的日志管理器）"""
     logger_manager = get_logger_manager()
-    return logger_manager.get_account_logger(email_addr, log_type="account")
+    return logger_manager.get_account_logger(email_addr)
 
 
 def save_failure_log(logger, email_addr):
-    """失败时保存详细日志到账号专用文件（使用统一的日志管理器）"""
-    # 新的日志系统已经自动写入文件，这里只需要记录失败标记
-    logger_manager = get_logger_manager()
-    failure_logger = logger_manager.get_failure_logger(email_addr)
+    """失败时记录标记（实际日志保存由 LoggerManager.record_result 处理）"""
+    # 新的日志系统在 record_result 时自动保存失败日志
+    # 这里只记录一个失败标记到当前 logger
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    failure_logger.info(f"\n{'='*60}")
-    failure_logger.info(f"尝试时间: {timestamp}")
-    failure_logger.info(f"账号: {email_addr}")
-    failure_logger.info(f"状态: 失败")
-    failure_logger.info(f"{'='*60}")
+    logger.info(f"{'='*60}")
+    logger.info(f"失败时间: {timestamp}")
+    logger.info(f"账号: {email_addr}")
+    logger.info(f"状态: 失败")
+    logger.info(f"{'='*60}")
 
 
 def log_summary(email_addr, success, duration_sec, extra_info="", stage="", iterations=0):
-    """记录摘要到全局日志（使用统一的日志管理器）"""
-    logger_manager = get_logger_manager()
-    daily_logger = logger_manager.get_daily_logger()
+    """记录摘要到控制台"""
     status = "成功" if success else "失败"
 
     parts = [f"[{email_addr}]", status]
@@ -113,9 +110,8 @@ def log_summary(email_addr, success, duration_sec, extra_info="", stage="", iter
         parts.append(extra_info)
 
     msg = " | ".join(parts)
-    daily_logger.info(msg)
 
-    # 同时输出到控制台
+    # 输出到控制台
     symbol = "✓" if success else "✗"
     print(f"[{symbol}] {msg}")
 
@@ -670,7 +666,17 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             console_log(email_addr, "stay-signed-in: 点击保持登录")
             logger.info("stay-signed-in - 点击'是'按钮")
             url_before = url
-            click_button(page, ["是", "Yes", "确定", "OK"])
+
+            # 尝试点击按钮
+            clicked = click_button(page, ["是", "Yes", "确定", "OK", "保持登录", "Stay signed in"])
+            if not clicked:
+                # 如果没找到按钮，尝试点击页面中心
+                logger.info("未找到按钮，尝试点击页面")
+                try:
+                    page.click("body", position={"x": 400, "y": 300})
+                except Exception:
+                    pass
+
             url = _check_url_change(page, url_before, "点击'是'按钮", 1500)
             continue
 

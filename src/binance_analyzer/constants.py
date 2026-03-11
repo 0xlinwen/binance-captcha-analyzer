@@ -75,7 +75,7 @@ CAPTCHA_STABILITY_CHECK_COUNT = 3
 DEFAULT_LOG_LEVEL = "INFO"
 
 # 日志输出目录
-DEFAULT_LOG_DIR = "output/logs"
+DEFAULT_LOG_DIR = "logs"
 
 # 日志文件最大大小（MB）
 LOG_MAX_FILE_SIZE_MB = 10

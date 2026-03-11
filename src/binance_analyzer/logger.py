@@ -1,69 +1,120 @@
 """
 统一日志管理模块
 
-提供统一的日志管理器，支持每日日志、账号专用日志、日志轮转等功能。
+日志策略：
+- 成功账号：只在控制台输出，不保留日志文件
+- 失败账号：详细记录到 logs/failures/{email}_{timestamp}.log
 
 目录结构：
     logs/
-    ├── binance_2024-01-01.log      # 每日主日志（完整执行过程）
-    ├── success/
-    │   └── 2024-01-01.log          # 当日成功账号列表（含 already_registered）
-    └── failure/
-        └── 2024-01-01.log          # 当日失败账号列表
+    └── failures/
+        ├── user1_2024-01-01_123456.log   # 失败账号详细日志
+        └── user2_2024-01-01_234567.log
 """
 
 import logging
+import io
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict
-from logging.handlers import RotatingFileHandler
 
 from .constants import (
     DEFAULT_LOG_LEVEL,
     DEFAULT_LOG_DIR,
-    LOG_MAX_FILE_SIZE_MB,
-    LOG_BACKUP_COUNT,
     LOG_FORMAT,
     LOG_DATE_FORMAT,
 )
 from .utils import sanitize_filename
 
 
+class AccountLogCapture:
+    """
+    账号日志捕获器
+
+    在内存中捕获单个账号的所有日志，执行结束后根据结果决定是否保存到文件。
+    """
+
+    def __init__(self, email: str, base_dir: Path):
+        self.email = email
+        self.base_dir = base_dir
+        self.buffer = io.StringIO()
+        self.start_time = datetime.now()
+
+        # 创建内存 handler
+        self.handler = logging.StreamHandler(self.buffer)
+        self.handler.setFormatter(logging.Formatter(
+            fmt=LOG_FORMAT,
+            datefmt=LOG_DATE_FORMAT
+        ))
+        self.handler.setLevel(logging.DEBUG)
+
+    def get_handler(self) -> logging.Handler:
+        return self.handler
+
+    def save_failure_log(self):
+        """保存失败日志到文件"""
+        failures_dir = self.base_dir / "failures"
+        failures_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_email = sanitize_filename(self.email.split("@")[0])
+        timestamp = self.start_time.strftime("%Y-%m-%d_%H%M%S")
+        log_file = failures_dir / f"{safe_email}_{timestamp}.log"
+
+        content = self.buffer.getvalue()
+        if content:
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(f"# 账号: {self.email}\n")
+                f.write(f"# 开始时间: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# 结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(content)
+
+        return log_file
+
+    def discard(self):
+        """丢弃日志（成功时调用）"""
+        self.buffer.close()
+
+    def close(self):
+        """关闭资源"""
+        self.handler.close()
+        if not self.buffer.closed:
+            self.buffer.close()
+
+
 class LoggerManager:
     """
     日志管理器
 
-    负责创建和管理所有日志记录器，防止重复创建和内存泄漏。
+    - 成功账号：只输出到控制台
+    - 失败账号：保存详细日志到 logs/failures/
     """
 
     def __init__(
         self,
         base_dir: Optional[Path] = None,
         log_level: str = DEFAULT_LOG_LEVEL,
-        max_file_size_mb: int = LOG_MAX_FILE_SIZE_MB,
-        backup_count: int = LOG_BACKUP_COUNT
     ):
         self.base_dir = Path(base_dir) if base_dir else Path(DEFAULT_LOG_DIR)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        # 创建 success / failure 子目录
-        self.success_dir = self.base_dir / "success"
-        self.failure_dir = self.base_dir / "failure"
-        self.success_dir.mkdir(parents=True, exist_ok=True)
-        self.failure_dir.mkdir(parents=True, exist_ok=True)
+        # 创建 failures 子目录
+        self.failures_dir = self.base_dir / "failures"
+        self.failures_dir.mkdir(parents=True, exist_ok=True)
 
         self.log_level = getattr(logging, log_level.upper(), logging.INFO)
-        self.max_file_size = max_file_size_mb * 1024 * 1024
-        self.backup_count = backup_count
-
-        # 日志记录器缓存
-        self._loggers: Dict[str, logging.Logger] = {}
 
         # 日志格式
         self.formatter = logging.Formatter(
             fmt=LOG_FORMAT,
             datefmt=LOG_DATE_FORMAT
         )
+
+        # 账号日志捕获器缓存
+        self._captures: Dict[str, AccountLogCapture] = {}
+
+        # 日志记录器缓存
+        self._loggers: Dict[str, logging.Logger] = {}
 
         # 当日统计
         self._today = datetime.now().strftime("%Y-%m-%d")
@@ -73,67 +124,79 @@ class LoggerManager:
             "failure": 0,
             "already_registered": 0,
             "rate_limited": 0,
+            "imap_auth_failed": 0,
+            "need_register": 0,
         }
 
-    # ------------------------------------------------------------------ #
-    # 核心日志记录器
-    # ------------------------------------------------------------------ #
+    def get_account_logger(self, email: str) -> logging.Logger:
+        """
+        获取账号专用日志记录器
 
-    def get_daily_logger(self, name: str = "binance") -> logging.Logger:
-        """获取每日主日志记录器（输出到文件 + 控制台）"""
-        logger_key = f"daily_{name}"
+        日志同时输出到：
+        1. 控制台（实时显示）
+        2. 内存缓冲区（用于失败时保存）
+        """
+        safe_email = sanitize_filename(email)
+        logger_key = f"account_{safe_email}"
+
         if logger_key in self._loggers:
             return self._loggers[logger_key]
 
         logger = logging.getLogger(logger_key)
-        logger.setLevel(self.log_level)
+        logger.setLevel(logging.DEBUG)
         logger.propagate = False
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_file = self.base_dir / f"{name}_{today}.log"
+        # 清除旧 handler
+        for h in logger.handlers[:]:
+            logger.removeHandler(h)
 
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=self.max_file_size,
-            backupCount=self.backup_count,
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(self.formatter)
-        logger.addHandler(file_handler)
-
+        # 控制台 handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(self.formatter)
+        console_handler.setLevel(self.log_level)
         logger.addHandler(console_handler)
 
+        # 内存捕获 handler
+        capture = AccountLogCapture(email, self.base_dir)
+        self._captures[email] = capture
+        logger.addHandler(capture.get_handler())
+
         self._loggers[logger_key] = logger
         return logger
 
-    def _get_result_logger(self, subdir: Path, suffix: str) -> logging.Logger:
-        """获取 success 或 failure 专用记录器（纯追加，无轮转）"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        logger_key = f"{suffix}_{today}"
+    def finalize_account(self, email: str, success: bool) -> Optional[Path]:
+        """
+        完成账号处理，根据结果决定是否保存日志
 
+        Args:
+            email: 账号邮箱
+            success: 是否成功
+
+        Returns:
+            失败时返回日志文件路径，成功时返回 None
+        """
+        capture = self._captures.pop(email, None)
+        if not capture:
+            return None
+
+        log_file = None
+        if not success:
+            log_file = capture.save_failure_log()
+        else:
+            capture.discard()
+
+        capture.close()
+
+        # 清理 logger
+        safe_email = sanitize_filename(email)
+        logger_key = f"account_{safe_email}"
         if logger_key in self._loggers:
-            return self._loggers[logger_key]
+            logger = self._loggers.pop(logger_key)
+            for h in logger.handlers[:]:
+                h.close()
+                logger.removeHandler(h)
 
-        logger = logging.getLogger(logger_key)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
-
-        log_file = subdir / f"{today}.log"
-        handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(message)s",
-            datefmt=LOG_DATE_FORMAT
-        ))
-        logger.addHandler(handler)
-
-        self._loggers[logger_key] = logger
-        return logger
-
-    # ------------------------------------------------------------------ #
-    # 结果写入（供 orchestrator 调用）
-    # ------------------------------------------------------------------ #
+        return log_file
 
     def record_result(
         self,
@@ -144,7 +207,7 @@ class LoggerManager:
         extra: str = "",
     ):
         """
-        记录单个账号的执行结果，写入 success/ 或 failure/ 并更新当日统计。
+        记录单个账号的执行结果
 
         result 取值说明：
             True              → 成功
@@ -152,44 +215,53 @@ class LoggerManager:
             False             → 失败
             "rate_limited"    → IP 被风控，算失败
             "need_register"   → 账号不存在，算失败
+            "imap_auth_failed" → IMAP 认证失败，算失败
         """
         self._stats["total"] += 1
 
         # 判断结果类型
         if result is True:
-            category = "success"
+            success = True
             label = "✅ 成功"
+            self._stats["success"] += 1
         elif result == "already_registered":
-            category = "success"          # already_registered 计入成功
+            success = True
             label = "✅ 已注册(成功)"
+            self._stats["success"] += 1
             self._stats["already_registered"] += 1
         elif result == "rate_limited":
-            category = "failure"
+            success = False
             label = "🚫 IP风控"
+            self._stats["failure"] += 1
             self._stats["rate_limited"] += 1
         elif result == "need_register":
-            category = "failure"
+            success = False
             label = "⚠️  未注册"
+            self._stats["failure"] += 1
+            self._stats["need_register"] += 1
+        elif result == "imap_auth_failed":
+            success = False
+            label = "📧 IMAP失败"
+            self._stats["failure"] += 1
+            self._stats["imap_auth_failed"] += 1
         else:
-            category = "failure"
+            success = False
             label = "❌ 失败"
+            self._stats["failure"] += 1
 
-        self._stats[category] += 1
+        # 完成账号日志处理
+        log_file = self.finalize_account(email, success)
 
-        # 写入对应结果文件
-        target_dir = self.success_dir if category == "success" else self.failure_dir
-        result_logger = self._get_result_logger(target_dir, category)
-
+        # 控制台输出结果
         msg = f"[Worker-{worker_id}] [{mode}] {label} | {email}"
         if extra:
             msg += f" | {extra}"
-        result_logger.info(msg)
+        if log_file:
+            msg += f" | 日志: {log_file}"
+        print(msg)
 
-    def log_daily_summary(self, main_logger: Optional[logging.Logger] = None):
-        """
-        将当日汇总统计写入主日志。
-        调用时机：所有 worker 全部完成后。
-        """
+    def log_daily_summary(self):
+        """输出当日汇总统计"""
         stats = self._stats
         today = self._today
         rate = f"{stats['success']/stats['total']*100:.1f}%" if stats['total'] > 0 else "N/A"
@@ -201,73 +273,41 @@ class LoggerManager:
             f"  总执行数   : {stats['total']}",
             f"  ✅ 成功     : {stats['success']}  (含已注册 {stats['already_registered']})",
             f"  ❌ 失败     : {stats['failure']}",
-            f"  🚫 IP风控   : {stats['rate_limited']}",
+            f"     - IP风控  : {stats['rate_limited']}",
+            f"     - IMAP失败: {stats['imap_auth_failed']}",
+            f"     - 未注册  : {stats['need_register']}",
             f"  成功率     : {rate}",
-            f"  详细结果   → success/{today}.log  |  failure/{today}.log",
+            f"  失败日志   → {self.failures_dir}/",
             f"{'='*60}\n",
         ]
 
-        lg = main_logger or self.get_daily_logger()
         for line in summary_lines:
-            lg.info(line)
+            print(line)
 
-    # ------------------------------------------------------------------ #
-    # 兼容旧接口
-    # ------------------------------------------------------------------ #
-
-    def get_account_logger(
-        self,
-        email: str,
-        log_type: str = "account"
-    ) -> logging.Logger:
-        """兼容旧接口：获取账号专用日志记录器"""
-        safe_email = sanitize_filename(email)
-        logger_key = f"{log_type}_{safe_email}"
-
-        if logger_key in self._loggers:
-            return self._loggers[logger_key]
-
-        logger = logging.getLogger(logger_key)
-        logger.setLevel(self.log_level)
-        logger.propagate = False
-
-        log_file = self.base_dir / f"{log_type}_{safe_email}.log"
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=self.max_file_size,
-            backupCount=self.backup_count,
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(self.formatter)
-        logger.addHandler(file_handler)
-
-        self._loggers[logger_key] = logger
-        return logger
-
-    def get_failure_logger(self, email: str) -> logging.Logger:
-        return self.get_account_logger(email, log_type="failure")
-
-    def get_success_logger(self, email: str) -> logging.Logger:
-        return self.get_account_logger(email, log_type="success")
-
-    # ------------------------------------------------------------------ #
-    # 清理
-    # ------------------------------------------------------------------ #
-
-    def cleanup_old_loggers(self, keep_count: int = 100):
-        """清理旧的日志记录器，防止内存泄漏"""
-        if len(self._loggers) <= keep_count:
+    def cleanup_old_logs(self, keep_days: int = 7):
+        """清理旧的失败日志文件"""
+        if not self.failures_dir.exists():
             return
-        logger_keys = list(self._loggers.keys())
-        to_remove = logger_keys[:-keep_count]
-        for key in to_remove:
-            logger = self._loggers.pop(key)
-            for handler in logger.handlers[:]:
-                handler.close()
-                logger.removeHandler(handler)
+
+        cutoff = datetime.now().timestamp() - (keep_days * 24 * 3600)
+        removed = 0
+        for f in self.failures_dir.glob("*.log"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except Exception:
+                pass
+
+        if removed > 0:
+            print(f"清理了 {removed} 个过期日志文件")
 
     def close_all(self):
-        """关闭所有日志记录器"""
+        """关闭所有资源"""
+        for capture in self._captures.values():
+            capture.close()
+        self._captures.clear()
+
         for logger in self._loggers.values():
             for handler in logger.handlers[:]:
                 handler.close()
@@ -297,6 +337,14 @@ def get_logger_manager(
 
 
 def get_logger(name: str = "binance") -> logging.Logger:
-    """获取日志记录器（快捷方式）"""
-    manager = get_logger_manager()
-    return manager.get_daily_logger(name)
+    """获取日志记录器（快捷方式，用于非账号相关的通用日志）"""
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            fmt=LOG_FORMAT,
+            datefmt=LOG_DATE_FORMAT
+        ))
+        logger.addHandler(handler)
+    return logger

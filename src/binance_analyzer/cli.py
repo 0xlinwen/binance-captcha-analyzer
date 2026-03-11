@@ -175,10 +175,22 @@ def main():
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             executor_ref = executor
-            futures = {executor.submit(process_account, task): task[1] for task in tasks}
+            futures = {executor.submit(process_account, task): task for task in tasks}
             for future in as_completed(futures):
                 try:
                     email_addr, password, result = future.result()
+                    task = futures[future]
+                    worker_id = task[4]
+                    mode = config.get("mode", "login")
+
+                    # 记录结果并处理日志
+                    get_logger_manager().record_result(
+                        email=email_addr,
+                        result=result,
+                        mode=mode,
+                        worker_id=worker_id,
+                    )
+
                     if result is True:
                         success_count += 1
                         _append_if_new(success_file, email_addr, password)

@@ -43,13 +43,24 @@ def save_registered_account(base_dir: Path, output_file: str, account_data: dict
                 except Exception:
                     data = {"accounts": []}
 
-            existing_emails = {acc.get("email") for acc in data["accounts"]}
-            if account_data.get("email") in existing_emails:
-                for i, acc in enumerate(data["accounts"]):
-                    if acc.get("email") == account_data.get("email"):
-                        data["accounts"][i] = account_data
-                        break
+            # 登录代码管理的字段（每次登录会更新）
+            LOGIN_MANAGED_FIELDS = {"cookie", "csrftoken", "enabled", "name", "mail_api_url"}
+
+            existing_idx = None
+            for i, acc in enumerate(data["accounts"]):
+                if acc.get("email") == account_data.get("email"):
+                    existing_idx = i
+                    break
+
+            if existing_idx is not None:
+                # 账号已存在：只更新登录相关字段，保留用户设置的字段
+                existing = data["accounts"][existing_idx]
+                for key in LOGIN_MANAGED_FIELDS:
+                    if key in account_data:
+                        existing[key] = account_data[key]
+                data["accounts"][existing_idx] = existing
             else:
+                # 新账号：直接添加
                 data["accounts"].append(account_data)
 
             with open(output_path, "w", encoding="utf-8") as f:
