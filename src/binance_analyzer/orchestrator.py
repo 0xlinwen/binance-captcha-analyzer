@@ -913,12 +913,21 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
             print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
             cookie_string, csrftoken = extract_cookies_and_csrf(page)
             if cookie_string and csrftoken:
+                # 构建邮件 API URL（Outlook 邮箱）
+                mail_api_url = ""
+                if email_addr.lower().endswith("@outlook.com"):
+                    mail_api_url = f"https://api.bujidian.com/getMailInfo?name={email_addr}&pwd={email_password}"
+
                 account_data = {
-                    "name":     f"账号_{email_addr.split('@')[0]}",
-                    "email":    email_addr,
-                    "cookie":   cookie_string,
-                    "csrftoken": csrftoken,
-                    "enabled":  True,
+                    "name":             f"账号_{email_addr.split('@')[0]}",
+                    "email":            f"{email_addr}:{email_password}",
+                    "cookie":           cookie_string,
+                    "csrftoken":        csrftoken,
+                    "enabled":          True,
+                    "avatar_changed":   False,
+                    "nickname_changed": False,
+                    "display_name":     "",
+                    "mail_api_url":     mail_api_url,
                 }
                 save_registered_account(base_dir, output_file, account_data)
                 print(f"\n[Worker-{worker_id}] 处理成功: {email_addr}")
