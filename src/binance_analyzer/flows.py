@@ -347,7 +347,16 @@ def _tick_agreement_checkbox(page, email_addr=None, logger=None):
 
 
 def _dismiss_error_popup(page, logger=None):
-    """检查并点击"已知晓"等弹窗按钮"""
+    """检查并点击"已知晓"等弹窗按钮，包括频率限制弹窗"""
+    # 先检测是否有频率限制弹窗
+    try:
+        body_text = page.inner_text("body")
+        if "frequency limit" in body_text.lower() or "208061" in body_text:
+            if logger:
+                logger.info("检测到频率限制弹窗 (208061)")
+    except Exception:
+        pass
+
     dismiss_btns = [
         "button:has-text('已知晓')",
         "button:has-text('Got it')",
@@ -357,6 +366,9 @@ def _dismiss_error_popup(page, logger=None):
         "button:has-text('Close')",
         "button:has-text('取消')",
         "button:has-text('Cancel')",
+        "button:has-text('Try again')",
+        "button:has-text('Retry')",
+        "button:has-text('重试')",
         "[aria-label='Close']",
     ]
     for selector in dismiss_btns:
