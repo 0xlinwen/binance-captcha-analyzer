@@ -142,10 +142,12 @@ cp config.example.json config.json
   // === 代理 ===
   "proxy": {
     "enabled": false,
-    "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",  // 动态 IP API（优先使用，无认证）
-    "server": "host:port",                 // 静态代理（回退用），支持 http/https/socks5
-    "username": "",                        // 静态代理认证（用于请求动态 API）
-    "password": ""
+    "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?...",  // 动态 IP API
+    "server": "host:port",                 // 认证代理（用于请求动态 API）
+    "username": "",                        // 代理用户名
+    "password": "",                        // 代理密码
+    "use_local_forward": false,            // 是否使用本地 gost 转发
+    "local_forward_port": 8888             // 本地转发端口
   },
 
   // === 登录 ===
@@ -202,50 +204,79 @@ python main.py --refresh-cache
 
 | 模式 | 配置 | 说明 |
 |------|------|------|
-| 动态 IP | `dynamic_api` | 优先使用，通过 API 获取无认证代理，每次请求新 IP |
-| 静态代理 | `server` + `username` + `password` | 回退用，动态 API 失败时使用 |
+| 动态 IP 直连 | `use_local_forward: false` | 本机 IP 需在白名单，直接使用动态 IP |
+| 本地 gost 转发 | `use_local_forward: true` | 通过本地 gost 转发，无需白名单 |
 
-### 动态 IP 配置（推荐）
+### 安装 gost
 
-使用 [B2Proxy](https://dashboard.b2proxy.com/zh-CN/proxy/residential) 等代理服务商的动态 IP API：
+```bash
+# macOS
+brew install gost
+
+# Linux
+# 下载最新版本: https://github.com/ginuerzh/gost/releases
+wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+gunzip gost-linux-amd64-2.11.5.gz
+chmod +x gost-linux-amd64-2.11.5
+sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
+```
+
+### 启动 gost 本地转发
+
+```bash
+# 格式: gost -L=http://:本地端口 -F=http://用户名:密码@代理服务器:端口
+gost -L=http://:8888 -F=http://TokencChan88:TokencChan88@92.112.110.120:8094
+```
+
+启动成功后会显示：
+```
+{"handler":"http","kind":"service","level":"info","listener":"tcp","msg":"listening on [::]:8888/tcp","service":"service-0","time":"..."}
+```
+
+### 配置示例
+
+#### 方式 1：本地 gost 转发（推荐，无需白名单）
+
+先启动 gost，然后配置：
 
 ```json
 "proxy": {
   "enabled": true,
   "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",
   "server": "92.112.110.120:8094",
-  "username": "your_username",
-  "password": "your_password"
+  "username": "TokencChan88",
+  "password": "TokencChan88",
+  "use_local_forward": true,
+  "local_forward_port": 8888
 }
 ```
 
 **工作流程：**
 1. 通过 `server`（带认证）请求 `dynamic_api` 获取动态 IP
-2. API 返回无认证代理（如 `162.128.86.126:10000`）
-3. 浏览器直接使用动态 IP（需本机 IP 在白名单）
-4. 走 subprocess 启动，无自动化特征
+2. 浏览器使用 `127.0.0.1:8888` → gost 转发 → 认证代理 → 目标网站
+
+#### 方式 2：动态 IP 直连（需白名单）
+
+```json
+"proxy": {
+  "enabled": true,
+  "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",
+  "server": "92.112.110.120:8094",
+  "username": "TokencChan88",
+  "password": "TokencChan88",
+  "use_local_forward": false,
+  "local_forward_port": 8888
+}
+```
 
 **前置条件：**
 - 在代理服务商后台将本机公网 IP 加入白名单
 - 查看本机 IP：`curl ifconfig.me`
 
-### 静态代理配置
-
-如果不使用动态 IP，清空 `dynamic_api` 即可：
-
-```json
-"proxy": {
-  "enabled": true,
-  "dynamic_api": "",
-  "server": "host:port",
-  "username": "",
-  "password": ""
-}
-```
-
-**注意：** 静态代理如果带认证（username/password），浏览器会弹出认证对话框。建议：
-- 使用白名单代理（无需认证）
-- 或使用 gost 本地转发：`gost -L=http://:8888 -F=http://user:pass@host:port`
+**工作流程：**
+1. 通过 `server`（带认证）请求 `dynamic_api` 获取动态 IP
+2. API 返回无认证代理（如 `162.128.86.126:10000`）
+3. 浏览器直接使用动态 IP（本机 IP 已在白名单）
 
 ---
 

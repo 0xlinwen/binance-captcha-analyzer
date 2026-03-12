@@ -873,9 +873,17 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     }
                 dynamic_proxy = _fetch_dynamic_proxy(dynamic_api, auth_proxy=auth_proxy)
                 if dynamic_proxy:
-                    # 动态 IP 无需认证，直接使用，走 subprocess
-                    proxy_settings = {"server": dynamic_proxy}
-                    print(f"[Worker-{worker_id}] 使用动态代理（无认证）: {dynamic_proxy}")
+                    # 检查是否使用本地 gost 转发
+                    use_local_forward = proxy_config.get("use_local_forward", False)
+                    if use_local_forward:
+                        # 使用本地 gost 转发（127.0.0.1:8888 -> 认证代理 -> 动态 IP）
+                        local_port = proxy_config.get("local_forward_port", 8888)
+                        proxy_settings = {"server": f"http://127.0.0.1:{local_port}"}
+                        print(f"[Worker-{worker_id}] 使用本地转发: 127.0.0.1:{local_port} -> 动态IP {dynamic_proxy}")
+                    else:
+                        # 直接使用动态 IP（需本机 IP 在白名单）
+                        proxy_settings = {"server": dynamic_proxy}
+                        print(f"[Worker-{worker_id}] 使用动态代理（无认证）: {dynamic_proxy}")
                 else:
                     print(f"[Worker-{worker_id}] 动态代理获取失败，回退到静态代理")
 
@@ -884,12 +892,19 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                 server = proxy_config["server"]
                 if not server.startswith(("http://", "https://", "socks")):
                     server = f"http://{server}"
-                proxy_settings = {"server": server}
-                if proxy_config.get("username"):
-                    proxy_settings["username"] = proxy_config["username"]
-                if proxy_config.get("password"):
-                    proxy_settings["password"] = proxy_config["password"]
-                print(f"[Worker-{worker_id}] 使用静态代理: {server}")
+                # 检查是否使用本地转发
+                use_local_forward = proxy_config.get("use_local_forward", False)
+                if use_local_forward:
+                    local_port = proxy_config.get("local_forward_port", 8888)
+                    proxy_settings = {"server": f"http://127.0.0.1:{local_port}"}
+                    print(f"[Worker-{worker_id}] 使用本地转发: 127.0.0.1:{local_port}")
+                else:
+                    proxy_settings = {"server": server}
+                    if proxy_config.get("username"):
+                        proxy_settings["username"] = proxy_config["username"]
+                    if proxy_config.get("password"):
+                        proxy_settings["password"] = proxy_config["password"]
+                    print(f"[Worker-{worker_id}] 使用静态代理: {server}")
 
         print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（完整反检测）")
         browser, context, page = _build_context(p, fingerprint, proxy_settings, headless)
