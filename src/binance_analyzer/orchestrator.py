@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import socket
 import time
+import requests
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -15,6 +16,66 @@ from .local_cache import init_cache_manager, get_cache_manager
 from .fingerprint import generate_fingerprint
 
 PAGE_TIMEOUT = 60000
+
+
+def _fetch_dynamic_proxy(api_url: str, auth_proxy: dict | None = None, timeout: int = 10) -> str | None:
+    """
+    从动态 IP API 获取无认证代理地址。
+
+    Args:
+        api_url: 动态 IP 获取链接
+        auth_proxy: 用于请求 API 的认证代理，格式 {"server": "ip:port", "username": "xxx", "password": "xxx"}
+        timeout: 请求超时时间（秒）
+
+    Returns:
+        代理地址字符串（如 "http://107.151.234.173:10000"），失败返回 None
+    """
+    try:
+        proxies = None
+        if auth_proxy and auth_proxy.get("server"):
+            server = auth_proxy["server"]
+            if not server.startswith(("http://", "https://", "socks")):
+                server = f"http://{server}"
+            # 构建带认证的代理 URL
+            if auth_proxy.get("username") and auth_proxy.get("password"):
+                # http://user:pass@ip:port
+                from urllib.parse import urlparse
+                parsed = urlparse(server)
+                auth_server = f"{parsed.scheme}://{auth_proxy['username']}:{auth_proxy['password']}@{parsed.netloc}"
+                proxies = {"http": auth_server, "https": auth_server}
+                print(f"[动态代理] 通过认证代理 {parsed.netloc} 请求 API...")
+            else:
+                proxies = {"http": server, "https": server}
+
+        resp = requests.get(api_url, timeout=timeout, proxies=proxies)
+        resp.raise_for_status()
+
+        # 尝试解析 JSON 格式
+        try:
+            data = resp.json()
+            if data.get("code") == 200 and data.get("data"):
+                ip_info = data["data"][0]
+                ip = ip_info.get("ip")
+                port = ip_info.get("port")
+                if ip and port:
+                    print(f"[动态代理] 获取成功: {ip}:{port}")
+                    return f"http://{ip}:{port}"
+        except (ValueError, KeyError, IndexError):
+            pass
+
+        # 回退：尝试解析纯文本格式 (IP:PORT)
+        proxy_addr = resp.text.strip()
+        if proxy_addr and ":" in proxy_addr:
+            parts = proxy_addr.split(":")
+            if len(parts) == 2 and parts[1].isdigit():
+                print(f"[动态代理] 获取成功: {proxy_addr}")
+                return f"http://{proxy_addr}"
+
+        print(f"[动态代理] 返回格式异常: {resp.text[:100]}")
+        return None
+    except Exception as e:
+        print(f"[动态代理] 获取失败: {e}")
+        return None
 
 # Playwright Chromium 路径
 _CHROMIUM_PATH = None
@@ -525,46 +586,17 @@ def _get_launch_args(screen_width: int, screen_height: int) -> list:
 def _build_context(p, fingerprint: dict, proxy_settings, headless: bool):
     """
     创建 browser + context + 注入脚本。
-    - 无代理 / 无认证代理：subprocess 启动（不带 --enable-automation）
-    - 需认证代理：Playwright launch + new_context(proxy=...) 方式
+    统一使用 subprocess 启动（不带 --enable-automation），更隐蔽。
     """
     viewport_height = fingerprint['screen_height'] - 80
-
-    # 需要认证的代理走 Playwright launch 方式
-    needs_auth = proxy_settings and proxy_settings.get("username")
-    if needs_auth:
-        browser, context, page = _build_context_playwright(
-            p, fingerprint, proxy_settings, headless, viewport_height
-        )
-    else:
-        browser, context, page = _build_context_subprocess(
-            p, fingerprint, proxy_settings, headless, viewport_height
-        )
+    browser, context, page = _build_context_subprocess(
+        p, fingerprint, proxy_settings, headless, viewport_height
+    )
 
     # 注入反检测脚本
     init_script = _build_init_script(fingerprint)
     context.add_init_script(init_script)
 
-    return browser, context, page
-
-
-def _build_context_playwright(p, fingerprint, proxy_settings, headless, viewport_height):
-    """Playwright launch 方式，支持代理认证。"""
-    launch_args = _get_launch_args(fingerprint['screen_width'], fingerprint['screen_height'])
-    browser = p.chromium.launch(
-        headless=headless,
-        args=launch_args,
-    )
-    context = browser.new_context(
-        proxy=proxy_settings,
-        user_agent=fingerprint['user_agent'],
-        locale=fingerprint['locale'],
-        timezone_id=fingerprint['timezone_id'],
-        viewport={'width': fingerprint['screen_width'], 'height': viewport_height},
-        screen={'width': fingerprint['screen_width'], 'height': fingerprint['screen_height']},
-        device_scale_factor=fingerprint['device_pixel_ratio'],
-    )
-    page = context.new_page()
     return browser, context, page
 
 
@@ -827,16 +859,37 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
         )
 
         proxy_settings = None
-        if proxy_enabled and proxy_config.get("server"):
-            server = proxy_config["server"]
-            if not server.startswith(("http://", "https://", "socks")):
-                server = f"http://{server}"
-            proxy_settings = {"server": server}
-            if proxy_config.get("username"):
-                proxy_settings["username"] = proxy_config["username"]
-            if proxy_config.get("password"):
-                proxy_settings["password"] = proxy_config["password"]
-            print(f"[Worker-{worker_id}] 使用代理: {server}")
+        if proxy_enabled:
+            # 优先使用动态 IP API（无认证，可走 subprocess）
+            dynamic_api = proxy_config.get("dynamic_api")
+            if dynamic_api:
+                # 构建认证代理配置，用于请求动态 IP API
+                auth_proxy = None
+                if proxy_config.get("server"):
+                    auth_proxy = {
+                        "server": proxy_config["server"],
+                        "username": proxy_config.get("username"),
+                        "password": proxy_config.get("password"),
+                    }
+                dynamic_proxy = _fetch_dynamic_proxy(dynamic_api, auth_proxy=auth_proxy)
+                if dynamic_proxy:
+                    # 动态 IP 无需认证，直接使用，走 subprocess
+                    proxy_settings = {"server": dynamic_proxy}
+                    print(f"[Worker-{worker_id}] 使用动态代理（无认证）: {dynamic_proxy}")
+                else:
+                    print(f"[Worker-{worker_id}] 动态代理获取失败，回退到静态代理")
+
+            # 回退到静态代理配置
+            if not proxy_settings and proxy_config.get("server"):
+                server = proxy_config["server"]
+                if not server.startswith(("http://", "https://", "socks")):
+                    server = f"http://{server}"
+                proxy_settings = {"server": server}
+                if proxy_config.get("username"):
+                    proxy_settings["username"] = proxy_config["username"]
+                if proxy_config.get("password"):
+                    proxy_settings["password"] = proxy_config["password"]
+                print(f"[Worker-{worker_id}] 使用静态代理: {server}")
 
         print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（完整反检测）")
         browser, context, page = _build_context(p, fingerprint, proxy_settings, headless)

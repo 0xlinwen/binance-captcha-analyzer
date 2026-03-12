@@ -37,6 +37,7 @@
   },
   "proxy": {
     "enabled": false,
+    "dynamic_api": "http://global.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&count=1&proto=http&stype=txt&sessType=rotating&split=\\r\\n",
     "server": "as.rrp.b2proxy.com:10000",
     "username": "USER717854-zone-custom-region-JP",
     "password": "a92a13"

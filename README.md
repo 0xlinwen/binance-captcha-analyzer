@@ -142,8 +142,9 @@ cp config.example.json config.json
   // === 代理 ===
   "proxy": {
     "enabled": false,
-    "server": "host:port",                 // 支持 http/https/socks5
-    "username": "",
+    "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",  // 动态 IP API（优先使用，无认证）
+    "server": "host:port",                 // 静态代理（回退用），支持 http/https/socks5
+    "username": "",                        // 静态代理认证（用于请求动态 API）
     "password": ""
   },
 
@@ -190,6 +191,61 @@ python main.py
 # 刷新缓存（删除旧缓存并重新预热）
 python main.py --refresh-cache
 ```
+
+---
+
+## 代理配置
+
+### 代理模式
+
+支持两种代理模式，统一使用 subprocess 启动浏览器（无 `--enable-automation` 特征）：
+
+| 模式 | 配置 | 说明 |
+|------|------|------|
+| 动态 IP | `dynamic_api` | 优先使用，通过 API 获取无认证代理，每次请求新 IP |
+| 静态代理 | `server` + `username` + `password` | 回退用，动态 API 失败时使用 |
+
+### 动态 IP 配置（推荐）
+
+使用 [B2Proxy](https://dashboard.b2proxy.com/zh-CN/proxy/residential) 等代理服务商的动态 IP API：
+
+```json
+"proxy": {
+  "enabled": true,
+  "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",
+  "server": "92.112.110.120:8094",
+  "username": "your_username",
+  "password": "your_password"
+}
+```
+
+**工作流程：**
+1. 通过 `server`（带认证）请求 `dynamic_api` 获取动态 IP
+2. API 返回无认证代理（如 `162.128.86.126:10000`）
+3. 浏览器直接使用动态 IP（需本机 IP 在白名单）
+4. 走 subprocess 启动，无自动化特征
+
+**前置条件：**
+- 在代理服务商后台将本机公网 IP 加入白名单
+- 查看本机 IP：`curl ifconfig.me`
+
+### 静态代理配置
+
+如果不使用动态 IP，清空 `dynamic_api` 即可：
+
+```json
+"proxy": {
+  "enabled": true,
+  "dynamic_api": "",
+  "server": "host:port",
+  "username": "",
+  "password": ""
+}
+```
+
+**注意：** 静态代理如果带认证（username/password），浏览器会弹出认证对话框。建议：
+- 使用白名单代理（无需认证）
+- 或使用 gost 本地转发：`gost -L=http://:8888 -F=http://user:pass@host:port`
 
 ---
 
@@ -538,6 +594,12 @@ IP 被风控，解决方案：
 |------|-------------|-------|-------|----------|
 | 调试 | 1 | false | 按需 | false |
 | 少量账号 | 1-2 | true | 按需 | false |
-| 批量处理 | 2-3 | true | 建议开启 | true |
+| 批量处理 | 2-3 | true | 动态 IP 推荐 | true |
 
 不建议 `max_workers >= 5`，风控触发概率明显增加。
+
+---
+
+## 相关链接
+
+- [B2Proxy 代理服务](https://dashboard.b2proxy.com/zh-CN/proxy/residential) - 动态 IP 代理服务商
