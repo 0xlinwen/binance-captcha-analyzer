@@ -110,6 +110,46 @@ def _find_checkbox_container(page):
     return None
 
 
+def is_checkbox_captcha_checked(page) -> bool:
+    """判断人机验证复选框是否已经出现勾选完成态。"""
+    try:
+        return bool(
+            page.evaluate(
+                """(signals) => {
+                    const normalizedSignals = signals.map((sig) => String(sig).toLowerCase().replace(/[’‘`]/g, "'"));
+                    const normalize = (value) => String(value || '').toLowerCase().replace(/[’‘`]/g, "'");
+                    const nodes = Array.from(document.querySelectorAll('div,span,label,p'));
+                    for (const node of nodes) {
+                        const text = normalize((node.textContent || '').trim());
+                        if (!text || text.length > 40) continue;
+                        if (!normalizedSignals.some((sig) => text.includes(sig))) continue;
+                        const textRect = node.getBoundingClientRect();
+                        if (textRect.width <= 0 || textRect.height <= 0) continue;
+                        const textCenterY = textRect.top + textRect.height / 2;
+                        const candidates = Array.from(document.querySelectorAll('button,div,span,label,input,[role="checkbox"]'));
+                        for (const candidate of candidates) {
+                            const rect = candidate.getBoundingClientRect();
+                            if (rect.width < 20 || rect.height < 20 || rect.width > 120 || rect.height > 120) continue;
+                            if (rect.right > textRect.left + 12) continue;
+                            if (Math.abs((rect.top + rect.height / 2) - textCenterY) > Math.max(40, textRect.height)) continue;
+                            const ariaChecked = String(candidate.getAttribute('aria-checked') || '').toLowerCase();
+                            const className = String(candidate.className || '').toLowerCase();
+                            const textValue = String(candidate.textContent || '');
+                            if (candidate.checked === true || ariaChecked === 'true') return true;
+                            if (/(checked|selected|active|success|complete|passed)/.test(className)) return true;
+                            if (/[✓✔]/.test(textValue)) return true;
+                            if (candidate.querySelector('svg,path,[class*="check"],[class*="tick"]')) return true;
+                        }
+                    }
+                    return false;
+                }""",
+                list(CHECKBOX_TEXT_SIGNALS),
+            )
+        )
+    except Exception:
+        return False
+
+
 def detect_captcha_type(page) -> tuple[CaptchaType, object | None]:
     """检测当前页面上的验证码类型。"""
     # 已进入图片/滑块挑战时优先按真实挑战处理，避免复选框说明文字残留导致误判。

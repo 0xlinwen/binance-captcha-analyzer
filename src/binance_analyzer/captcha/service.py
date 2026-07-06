@@ -14,13 +14,14 @@ from ..constants import (
 )
 from ..utils import dismiss_global_modal, retry_with_backoff
 from .ai_client import OpenRouterCaptchaClient
-from .detector import detect_captcha_type
+from .detector import detect_captcha_type, is_checkbox_captcha_checked
 from .solvers import CaptchaSolverRegistry, build_default_solver_registry
 from .types import CaptchaSolveContext, CaptchaSolveStatus, CaptchaType
 
 logger = logging.getLogger(__name__)
 
 MAX_COOLDOWN_SECONDS = 30
+MAX_CHECKBOX_TRANSITION_ATTEMPTS = 3
 
 
 class CaptchaService:
@@ -110,9 +111,11 @@ class CaptchaService:
                     print(f"重开登录页失败: {exc}")
                     return CaptchaSolveStatus.FAILED
 
-            for attempt in range(max_attempts):
-                print(f"\n--- 验证码轮次 {round_idx + 1}/{max_rounds}，尝试 {attempt + 1}/{max_attempts} ---")
-                if attempt > 0:
+            challenge_attempt = 0
+            checkbox_transition_attempt = 0
+            while challenge_attempt < max_attempts:
+                print(f"\n--- 验证码轮次 {round_idx + 1}/{max_rounds}，尝试 {challenge_attempt + 1}/{max_attempts} ---")
+                if challenge_attempt > 0:
                     time.sleep(random.uniform(0.5, 1.0))
                 dismiss_global_modal(page)
 
@@ -143,10 +146,24 @@ class CaptchaService:
 
                 solved = self._call_solver_with_retry(solver, page, captcha_element, context, ai_client)
 
+                if solved and captcha_type is CaptchaType.CHECKBOX and self.checkbox_checked_stably(page):
+                    print("[验证码] 复选框验证码已勾选，通过!")
+                    return CaptchaSolveStatus.PASSED
+
                 if solved and self.captcha_gone_stably(page):
                     print(f"[验证码] {captcha_type.value} 验证码通过!")
                     return CaptchaSolveStatus.PASSED
 
+                if captcha_type is CaptchaType.CHECKBOX:
+                    checkbox_transition_attempt += 1
+                    if checkbox_transition_attempt >= MAX_CHECKBOX_TRANSITION_ATTEMPTS:
+                        print("[验证码] 复选框验证码多次处理后仍未通过")
+                        challenge_attempt += 1
+                    else:
+                        self._wait_for_captcha_result(page, previous_type=captcha_type)
+                    continue
+
+                challenge_attempt += 1
                 if captcha_type is CaptchaType.CLICK:
                     self._wait_for_click_captcha_reload(page)
 
@@ -170,6 +187,15 @@ class CaptchaService:
                 page.wait_for_timeout(interval_ms)
         return True
 
+    def checkbox_checked_stably(self, page, checks: int = 2, interval_ms: int = 300) -> bool:
+        """多次确认复选框处于勾选完成态。"""
+        for index in range(max(1, checks)):
+            if not is_checkbox_captcha_checked(page):
+                return False
+            if index < checks - 1:
+                page.wait_for_timeout(interval_ms)
+        return True
+
     def _call_solver_with_retry(self, solver, page, captcha_element, context, ai_client):
         def call_solver():
             return solver.solve(page, captcha_element, context, ai_client)
@@ -181,6 +207,21 @@ class CaptchaService:
             logger=logger,
             operation_name="AI 验证码识别",
         )
+
+    def _wait_for_captcha_result(self, page, *, previous_type: CaptchaType) -> CaptchaType:
+        """等待当前验证码点击后的页面结果，再由主循环按最新类型截图识别。"""
+        print(f"[验证码] 等待 {previous_type.value} 验证结果...")
+        page.wait_for_timeout(random.randint(800, 1200))
+        for _index in range(15):
+            captcha_type, _ = detect_captcha_type(page)
+            if captcha_type is CaptchaType.UNKNOWN:
+                if self.captcha_gone_stably(page):
+                    return CaptchaType.UNKNOWN
+            elif captcha_type is not previous_type:
+                print(f"[验证码] 检测到验证码类型切换: {previous_type.value} -> {captcha_type.value}")
+                return captcha_type
+            page.wait_for_timeout(200)
+        return previous_type
 
     def _detect_special_page_result(
         self,

@@ -10,11 +10,78 @@ from numbers import Real
 from ..utils import dismiss_global_modal
 from .ai_client import OpenRouterCaptchaClient, parse_json_response, png_dimensions, screenshot_to_base64
 from .browser_actions import click_at_page_coordinate, click_captcha_images, simulate_human_drag
+from .detector import CHECKBOX_TEXT_SIGNALS, is_checkbox_captcha_checked
 from .types import CaptchaSolveContext, CaptchaType
 
 
 def _is_finite_number(value) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and isfinite(float(value))
+
+
+def _find_checkbox_click_target_box(page) -> dict[str, float] | None:
+    """定位复选框左侧可点击方框，避免误点到文字区域。"""
+    try:
+        value = page.evaluate(
+            """(signals) => {
+                const normalizedSignals = signals.map((sig) => String(sig).toLowerCase().replace(/[’‘`]/g, "'"));
+                const normalize = (value) => String(value || '').toLowerCase().replace(/[’‘`]/g, "'");
+                const textNodes = Array.from(document.querySelectorAll('div,span,label,p'));
+                let best = null;
+                let bestScore = Number.POSITIVE_INFINITY;
+                for (const node of textNodes) {
+                    const text = normalize((node.textContent || '').trim());
+                    if (!text || text.length > 40) continue;
+                    if (!normalizedSignals.some((sig) => text.includes(sig))) continue;
+                    const textRect = node.getBoundingClientRect();
+                    if (textRect.width <= 0 || textRect.height <= 0) continue;
+                    const textCenterY = textRect.top + textRect.height / 2;
+                    const candidates = Array.from(document.querySelectorAll('button,div,span,label,input,[role="checkbox"]'));
+                    for (const candidate of candidates) {
+                        const rect = candidate.getBoundingClientRect();
+                        if (rect.width < 24 || rect.height < 24 || rect.width > 130 || rect.height > 130) continue;
+                        const ratio = rect.width / rect.height;
+                        if (ratio < 0.55 || ratio > 1.8) continue;
+                        if (rect.right > textRect.left + 16) continue;
+                        const centerY = rect.top + rect.height / 2;
+                        const verticalDistance = Math.abs(centerY - textCenterY);
+                        if (verticalDistance > Math.max(45, textRect.height * 1.4)) continue;
+                        const horizontalGap = textRect.left - rect.right;
+                        if (horizontalGap < -16 || horizontalGap > 180) continue;
+                        const className = String(candidate.className || '').toLowerCase();
+                        const role = String(candidate.getAttribute('role') || '').toLowerCase();
+                        let score = horizontalGap + verticalDistance * 2;
+                        if (role === 'checkbox' || /check|checkbox|bcap/.test(className)) score -= 30;
+                        if (candidate.querySelector('svg,path,[class*="check"],[class*="tick"]')) score -= 10;
+                        if (score < bestScore) {
+                            bestScore = score;
+                            best = {x: rect.left, y: rect.top, width: rect.width, height: rect.height};
+                        }
+                    }
+                }
+                return best;
+            }""",
+            list(CHECKBOX_TEXT_SIGNALS),
+        )
+    except Exception:
+        return None
+    if not isinstance(value, dict):
+        return None
+    try:
+        target_box = {
+            "x": float(value["x"]),
+            "y": float(value["y"]),
+            "width": float(value["width"]),
+            "height": float(value["height"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+    if target_box["width"] <= 0 or target_box["height"] <= 0:
+        return None
+    return target_box
+
+
+def _contains_point(box: dict[str, float], x: float, y: float) -> bool:
+    return box["x"] <= x <= box["x"] + box["width"] and box["y"] <= y <= box["y"] + box["height"]
 
 
 class BaseCaptchaSolver(ABC):
@@ -30,9 +97,9 @@ class BaseCaptchaSolver(ABC):
 class CheckboxCaptchaSolver(BaseCaptchaSolver):
     """人机身份验证复选框 solver。
 
-    BCaptcha 初始入口：勾选"进行人机身份验证"复选框后，才会弹出后续的
-    点击网格或滑块挑战。用 AI 返回复选框中心的截图相对坐标，换算为页面
-    绝对坐标后模拟点击——不依赖被混淆的内部 DOM 选择器。
+    用 AI 返回复选框中心的截图相对坐标，换算为页面绝对坐标后模拟点击；
+    点击后由服务层继续检测当前验证码是否消失、重绘或切换为其他类型。
+    这里不依赖被混淆的内部 DOM 选择器。
     """
 
     captcha_type = CaptchaType.CHECKBOX
@@ -72,9 +139,19 @@ class CheckboxCaptchaSolver(BaseCaptchaSolver):
         page_y = box["y"] + rel_y * scale_y
         print(f"[复选框] AI 坐标({rel_x:.0f},{rel_y:.0f}) -> 页面({page_x:.1f},{page_y:.1f})")
 
+        target_box = _find_checkbox_click_target_box(page)
+        if target_box and not _contains_point(target_box, page_x, page_y):
+            page_x = target_box["x"] + target_box["width"] / 2
+            page_y = target_box["y"] + target_box["height"] / 2
+            print(f"[复选框] AI 坐标不在方框内，改点方框中心({page_x:.1f},{page_y:.1f})")
+
         click_at_page_coordinate(page, page_x, page_y)
         page.wait_for_timeout(random.randint(1000, 1600))
-        return True
+        if is_checkbox_captcha_checked(page):
+            print("[复选框] 已检测到勾选完成态")
+            return True
+        print("[复选框] 点击后未检测到勾选态，进入下一次识别")
+        return False
 
 
 class ClickCaptchaSolver(BaseCaptchaSolver):

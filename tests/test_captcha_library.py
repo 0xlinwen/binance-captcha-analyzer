@@ -8,6 +8,7 @@ from binance_analyzer.captcha.service import CaptchaService
 from binance_analyzer.captcha.solvers import (
     CheckboxCaptchaSolver,
     ClickCaptchaSolver,
+    CaptchaSolverRegistry,
     SliderCaptchaSolver,
     build_default_solver_registry,
 )
@@ -16,6 +17,18 @@ from binance_analyzer.captcha.types import CaptchaSolveStatus, CaptchaType
 
 def _png_bytes(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+
+
+class _RecordingSolver:
+    """测试用 solver，记录服务层按类型调用的顺序。"""
+
+    def __init__(self, captcha_type: CaptchaType, calls: list[CaptchaType]) -> None:
+        self.captcha_type = captcha_type
+        self._calls = calls
+
+    def solve(self, page, captcha_element, context, ai_client) -> bool:
+        self._calls.append(self.captcha_type)
+        return True
 
 
 class CaptchaLibraryTests(unittest.TestCase):
@@ -32,7 +45,8 @@ class CaptchaLibraryTests(unittest.TestCase):
 
         self.assertIn("选择猫", click_prompt)
         self.assertIn("3x3", click_prompt)
-        self.assertIn("320px", slider_prompt)
+        self.assertIn("这是一个滑块验证码图片", slider_prompt)
+        self.assertIn("缺口的位置（X 坐标）", slider_prompt)
 
     @patch("binance_analyzer.captcha.service.detect_captcha_type")
     def test_service_returns_status_when_captcha_disappears_stably(self, mock_detect_captcha_type) -> None:
@@ -44,6 +58,35 @@ class CaptchaLibraryTests(unittest.TestCase):
         result = CaptchaService().solve(page, "sk-test", "model-x", max_attempts=1)
 
         self.assertIs(result, CaptchaSolveStatus.PASSED)
+
+    @patch("binance_analyzer.captcha.service.is_checkbox_captcha_checked", return_value=False)
+    @patch("binance_analyzer.captcha.service.detect_captcha_type")
+    def test_service_keeps_checkbox_attempts_separate_from_click_attempt(
+        self, mock_detect_captcha_type, _mock_checked
+    ) -> None:
+        calls: list[CaptchaType] = []
+        registry = CaptchaSolverRegistry()
+        registry.register(_RecordingSolver(CaptchaType.CHECKBOX, calls))
+        registry.register(_RecordingSolver(CaptchaType.CLICK, calls))
+        page = Mock()
+        page.query_selector.return_value = None
+        page.inner_text.return_value = ""
+        checkbox_element = Mock()
+        click_element = Mock()
+        mock_detect_captcha_type.side_effect = [
+            (CaptchaType.CHECKBOX, checkbox_element),
+            (CaptchaType.CLICK, click_element),
+            (CaptchaType.CLICK, click_element),
+            (CaptchaType.CLICK, click_element),
+            (CaptchaType.UNKNOWN, None),
+            (CaptchaType.UNKNOWN, None),
+            (CaptchaType.UNKNOWN, None),
+        ]
+
+        result = CaptchaService(registry).solve(page, "sk-test", "model-x", max_attempts=1)
+
+        self.assertIs(result, CaptchaSolveStatus.PASSED)
+        self.assertEqual(calls, [CaptchaType.CHECKBOX, CaptchaType.CLICK])
 
     def test_click_solver_requires_prompt_text(self) -> None:
         page = Mock()
@@ -70,6 +113,38 @@ class CaptchaLibraryTests(unittest.TestCase):
         result = CheckboxCaptchaSolver().solve(Mock(), captcha_element, Mock(), ai_client)
 
         self.assertFalse(result)
+
+    @patch("binance_analyzer.captcha.solvers.is_checkbox_captcha_checked", return_value=True)
+    @patch("binance_analyzer.captcha.solvers.click_at_page_coordinate")
+    def test_checkbox_solver_clicks_detected_square_when_ai_points_to_text(self, mock_click, _mock_checked) -> None:
+        captcha_element = Mock()
+        captcha_element.bounding_box.return_value = {"x": 100, "y": 50, "width": 400, "height": 200}
+        captcha_element.screenshot.return_value = _png_bytes(800, 400)
+        page = Mock()
+        page.evaluate.return_value = {"x": 120, "y": 80, "width": 80, "height": 80}
+        ai_client = Mock()
+        ai_client.analyze_checkbox_captcha.return_value = '{"found": true, "x": 300, "y": 100}'
+
+        result = CheckboxCaptchaSolver().solve(page, captcha_element, Mock(), ai_client)
+
+        self.assertTrue(result)
+        mock_click.assert_called_once_with(page, 160, 120)
+
+    @patch("binance_analyzer.captcha.service.is_checkbox_captcha_checked", return_value=True)
+    @patch("binance_analyzer.captcha.service.detect_captcha_type")
+    def test_service_accepts_checked_checkbox_as_passed(self, mock_detect_captcha_type, _mock_checked) -> None:
+        calls: list[CaptchaType] = []
+        registry = CaptchaSolverRegistry()
+        registry.register(_RecordingSolver(CaptchaType.CHECKBOX, calls))
+        page = Mock()
+        page.query_selector.return_value = None
+        page.inner_text.return_value = ""
+        mock_detect_captcha_type.return_value = (CaptchaType.CHECKBOX, Mock())
+
+        result = CaptchaService(registry).solve(page, "sk-test", "model-x", max_attempts=1)
+
+        self.assertIs(result, CaptchaSolveStatus.PASSED)
+        self.assertEqual(calls, [CaptchaType.CHECKBOX])
 
     @patch("binance_analyzer.captcha.solvers.simulate_human_drag", return_value=True)
     def test_slider_solver_converts_ai_pixels_to_css_distance(self, mock_drag) -> None:
