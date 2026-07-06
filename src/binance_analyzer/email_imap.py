@@ -4,6 +4,8 @@ import random
 import re
 import time
 import logging
+import ssl
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from contextlib import contextmanager
 
@@ -25,10 +27,97 @@ from .exceptions import (
 
 logger = logging.getLogger(__name__)
 OUTLOOK_MAIL_API_URL = "https://api.bujidian.com/getMailInfo"
+MICROSOFT_CONSUMER_MAIL_DOMAINS = ("@outlook.com", "@hotmail.com", "@live.com", "@msn.com")
+BINANCE_MAIL_KEYWORD = "binance"
+MICROSOFT_IMAP_HOST = "outlook.office365.com"
+MICROSOFT_IMAP_PORT = 993
+MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+MICROSOFT_IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 
 
-def _is_outlook_address(email_addr: str) -> bool:
-    return str(email_addr).strip().lower().endswith("@outlook.com")
+@dataclass(frozen=True)
+class OAuthImapCredentials:
+    password: str
+    client_id: str
+    refresh_token: str
+
+
+def _parse_oauth_imap_credentials(email_password: str) -> OAuthImapCredentials | None:
+    """账号行是 email----password----client_id----refresh_token 时启用 OAuth+IMAP。"""
+    parts = str(email_password or "").split("----")
+    if len(parts) != 3:
+        return None
+
+    password, client_id, refresh_token = (part.strip() for part in parts)
+    if not password or not client_id or not refresh_token:
+        return None
+
+    return OAuthImapCredentials(
+        password=password,
+        client_id=client_id,
+        refresh_token=refresh_token,
+    )
+
+
+def get_login_password(email_password: str) -> str:
+    """返回账号真实密码；4 段账号行会把 OAuth 信息从登录密码中剥离。"""
+    credentials = _parse_oauth_imap_credentials(email_password)
+    if credentials:
+        return credentials.password
+    return email_password
+
+
+@contextmanager
+def _direct_requests_session():
+    session = requests.Session()
+    session.trust_env = False
+    session.proxies.clear()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _get_oauth_imap_access_token(credentials: OAuthImapCredentials, timeout=15) -> str:
+    with _direct_requests_session() as session:
+        resp = session.post(
+            MICROSOFT_TOKEN_URL,
+            data={
+                "client_id": credentials.client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": credentials.refresh_token,
+                "scope": MICROSOFT_IMAP_SCOPE,
+            },
+            timeout=timeout,
+        )
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise IMAPConnectionError(f"OAuth token 响应解析失败: {e}") from e
+
+    access_token = data.get("access_token")
+    if not access_token:
+        message = data.get("error_description") or data.get("error") or resp.text
+        raise IMAPAuthFailed(f"OAuth token 获取失败: {message}")
+
+    return access_token
+
+
+def _build_xoauth2_payload(email_addr: str, access_token: str) -> bytes:
+    return f"user={email_addr}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")
+
+
+def _is_microsoft_consumer_address(email_addr: str) -> bool:
+    """判断邮箱是否属于 Microsoft 消费邮箱域名。"""
+    normalized_email_addr = str(email_addr).strip().lower()
+    return normalized_email_addr.endswith(MICROSOFT_CONSUMER_MAIL_DOMAINS)
+
+
+def _is_binance_api_message(subject: str, content: str) -> bool:
+    """判断 API 返回邮件是否为 Binance 邮件，避免从欢迎邮件中误提取数字。"""
+    combined_text = f"{subject}\n{content}".lower()
+    return BINANCE_MAIL_KEYWORD in combined_text
 
 
 def _strip_html(text: str) -> str:
@@ -49,10 +138,7 @@ def _strip_html(text: str) -> str:
 def _extract_6digit_code(text: str) -> str | None:
     """
     从文本中提取 6 位验证码。
-    修复：
-    1. \b 在中文字符后不工作，改用 (?<!\d)...(?!\d) lookaround
-    2. 过滤时间戳格式（HH:MM:SS / YYYY-MM-DD）中误匹配的数字
-    3. 优先匹配"验证码/驗證碼"附近的数字，再兜底匹配独立 6 位数
+    只接受验证码关键词附近的数字，避免把订单号、时间戳等正文数字误判为验证码。
     """
     if not text:
         return None
@@ -61,6 +147,7 @@ def _extract_6digit_code(text: str) -> str | None:
     keyword_patterns = [
         r'[验驗][证證][码碼][：:\s]*(\d{4,8})',
         r'[激][活][码碼][：:\s]*(\d{4,8})',
+        r'[Vv]erification\s+[Cc]ode(?:\s+is)?[：:\s]*(\d{4,8})',
         r'[Cc]ode[：:\s]*(\d{4,8})',
         r'[Vv]erification[：:\s]*(\d{4,8})',
         r'[Cc]onfirmation[：:\s]*(\d{4,8})',
@@ -72,17 +159,6 @@ def _extract_6digit_code(text: str) -> str | None:
         m = re.search(pattern, text)
         if m:
             return m.group(1)
-
-    # 兜底：独立的 6 位数字
-    # 排除时间戳（如 06:39:39 / 2026-03-04）
-    # 先把时间戳替换掉再匹配
-    clean = re.sub(r'\d{4}-\d{2}-\d{2}', '', text)          # 日期
-    clean = re.sub(r'\d{1,2}:\d{2}:\d{2}', '', clean)        # 时间
-    clean = re.sub(r'\d{4}/\d{2}/\d{2}', '', clean)          # 斜线日期
-    # (?<!\d)(\d{6})(?!\d) 代替 \b，兼容中文前缀
-    m = re.search(r'(?<!\d)(\d{6})(?!\d)', clean)
-    if m:
-        return m.group(1)
 
     return None
 
@@ -121,11 +197,12 @@ def _fetch_outlook_code_via_api(email_addr: str, email_password: str, timeout=60
 
         print(f"[{email_addr}] 请求邮件 ...")
         try:
-            resp = requests.get(
-                OUTLOOK_MAIL_API_URL,
-                params={"name": email_addr, "pwd": email_password},
-                timeout=15,
-            )
+            with _direct_requests_session() as session:
+                resp = session.get(
+                    OUTLOOK_MAIL_API_URL,
+                    params={"name": email_addr, "pwd": get_login_password(email_password)},
+                    timeout=15,
+                )
             data = resp.json()
         except Exception as e:
             print(f"[{email_addr}] 请求失败: {e}")
@@ -156,6 +233,12 @@ def _fetch_outlook_code_via_api(email_addr: str, email_password: str, timeout=60
         send_time = msg_obj.get("send_time_utc", "") or ""
         print(f"[{email_addr}] 收到邮件: {subject} ({send_time})")
         logger.info(f"[{email_addr}] Outlook API 收到邮件: subject={subject!r}")
+
+        if not _is_binance_api_message(subject, content):
+            print(f"[{email_addr}] 最新邮件不是 Binance 邮件，{poll_interval}秒后重试...")
+            logger.info(f"[{email_addr}] Outlook API 最新邮件不是 Binance 邮件: subject={subject!r}")
+            time.sleep(poll_interval)
+            continue
 
         # 优先从 subject 提取，再从 content 提取
         code = _extract_code_from_api_text(subject)
@@ -206,6 +289,46 @@ def imap_connection(imap_host, imap_port, email_addr, email_password):
                 pass
 
 
+@contextmanager
+def oauth_imap_connection(imap_host, imap_port, email_addr, email_password):
+    """使用账号行第 3/4 段 refresh token 进行 OAuth+IMAP 登录。"""
+    credentials = _parse_oauth_imap_credentials(email_password)
+    if not credentials:
+        raise IMAPAuthFailed("缺少 OAuth IMAP 凭据")
+
+    mail = None
+    try:
+        access_token = _get_oauth_imap_access_token(credentials)
+        logger.info(f"[{email_addr}] OAuth+IMAP 连接: {MICROSOFT_IMAP_HOST}:{MICROSOFT_IMAP_PORT}")
+        mail = imaplib.IMAP4_SSL(
+            MICROSOFT_IMAP_HOST,
+            MICROSOFT_IMAP_PORT,
+            timeout=IMAP_CONNECTION_TIMEOUT_SEC,
+            ssl_context=ssl.create_default_context(),
+        )
+        mail.authenticate("XOAUTH2", lambda _: _build_xoauth2_payload(email_addr, access_token))
+        yield mail
+    except IMAPAuthFailed:
+        raise
+    except imaplib.IMAP4.error as e:
+        raise IMAPAuthFailed(f"OAuth IMAP 认证失败: {e}") from e
+    except Exception as e:
+        raise IMAPConnectionError(f"OAuth IMAP 连接失败: {e}") from e
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
+def _select_imap_connection(imap_host, imap_port, email_addr, email_password):
+    if _parse_oauth_imap_credentials(email_password):
+        logger.info(f"[{email_addr}] 检测到 4 段账号，使用 OAuth+IMAP")
+        return oauth_imap_connection(imap_host, imap_port, email_addr, email_password)
+    return imap_connection(imap_host, imap_port, email_addr, email_password)
+
+
 def get_initial_mail_count(imap_host, imap_port, email_addr, email_password):
     """
     获取邮箱初始邮件数量
@@ -213,12 +336,14 @@ def get_initial_mail_count(imap_host, imap_port, email_addr, email_password):
     Returns:
         邮件数量，失败返回 0 或 "imap_auth_failed"
     """
-    if _is_outlook_address(email_addr):
+    if _parse_oauth_imap_credentials(email_password):
+        logger.info(f"[{email_addr}] OAuth+IMAP 模式获取初始邮件数量")
+    elif _is_microsoft_consumer_address(email_addr):
         logger.info(f"[{email_addr}] Outlook 邮箱使用 API 拉码，跳过 IMAP 初始计数")
         return 0
 
     def _get_count():
-        with imap_connection(imap_host, imap_port, email_addr, email_password) as mail:
+        with _select_imap_connection(imap_host, imap_port, email_addr, email_password) as mail:
             mail.select("INBOX")
             _, messages = mail.search(None, "ALL")
             count = len(messages[0].split()) if messages[0] else 0
@@ -247,12 +372,14 @@ def get_latest_binance_mail_timestamp(imap_host, imap_port, email_addr, email_pa
     Returns:
         时间戳(float)，没有币安邮件返回 0，失败返回 0 或 "imap_auth_failed"
     """
-    if _is_outlook_address(email_addr):
+    if _parse_oauth_imap_credentials(email_password):
+        logger.info(f"[{email_addr}] OAuth+IMAP 模式获取最新币安邮件时间戳")
+    elif _is_microsoft_consumer_address(email_addr):
         # Outlook API 模式下返回当前时间，确保只获取之后的邮件
         return time.time()
 
     def _get_timestamp():
-        with imap_connection(imap_host, imap_port, email_addr, email_password) as mail:
+        with _select_imap_connection(imap_host, imap_port, email_addr, email_password) as mail:
             mail.select("INBOX")
             _, messages = mail.search(None, "ALL")
             if not messages[0]:
@@ -386,7 +513,9 @@ def get_email_verification_code(
     Returns:
         验证码字符串，失败返回 None 或 "imap_auth_failed"
     """
-    if _is_outlook_address(username):
+    if _parse_oauth_imap_credentials(password):
+        logger.info(f"[{username}] 使用 OAuth+IMAP 获取验证码")
+    elif _is_microsoft_consumer_address(username):
         logger.info(f"[{username}] 使用 Outlook API 获取验证码")
         return _fetch_outlook_code_via_api(username, password, timeout=timeout, poll_interval=5, should_abort=should_abort)
 
@@ -405,7 +534,7 @@ def get_email_verification_code(
             return "aborted"
 
         try:
-            with imap_connection(imap_host, imap_port, username, password) as mail:
+            with _select_imap_connection(imap_host, imap_port, username, password) as mail:
                 auth_fail_count = 0
                 mail.select("INBOX")
 
@@ -726,10 +855,5 @@ def _submit_mfa(page):
         except Exception:
             pass
 
-    try:
-        page.keyboard.press("Enter")
-        logger.info("未找到提交按钮，尝试按回车...")
-        return True
-    except Exception as e:
-        logger.error(f"提交 MFA 失败: {e}")
-        return False
+    logger.error(f"提交 MFA 失败：未找到提交按钮，已检查 selectors={selectors}")
+    return False

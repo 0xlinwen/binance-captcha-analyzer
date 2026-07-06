@@ -19,6 +19,7 @@ env/
 output/
 screenshots/
 debug/
+debug_artifacts/
 *.lock
 .browser_cache/
 

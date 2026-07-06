@@ -10,17 +10,28 @@
   "headless": false,
   "max_workers": 1,
   "max_login_retries": 3,
+  "runtime": {
+    "max_workers_default": 2,
+    "retry_delay_min_sec": 20,
+    "retry_delay_max_sec": 60,
+    "proxy_retry_delay_min_sec": 10,
+    "proxy_retry_delay_max_sec": 30
+  },
   "mode": "login",
   "debug_mode": false,
   "login": {
     "start_url": "https://accounts.binance.com/zh-CN/login"
   },
+  "register": {
+    "submit_error_ack_max_attempts": 3
+  },
   "captcha": {
     "retry_mode": "fast",
     "max_attempts_per_round": 1,
     "max_rounds": 3,
-    "cooldown_min_sec": 30,
-    "cooldown_max_sec": 90
+    "cooldown_on_risk_min_sec": 30,
+    "cooldown_on_risk_max_sec": 90,
+    "click_retry_per_cell": 3
   },
   "mfa": {
     "submit_retry": 2,
@@ -30,18 +41,42 @@
       "account does not exist",
       "not registered",
       "没有账号"
-    ]
+    ],
+    "email_verification_enabled": true
   },
   "cache": {
     "enabled": true
   },
+  "ai_proxy": {
+    "enabled": true,
+    "bootstrap": {
+      "host": "proxy-bootstrap.example.com",
+      "port": 10000,
+      "username": "PROXY_USERNAME",
+      "password": "PROXY_PASSWORD"
+    }
+  },
   "proxy": {
     "enabled": false,
-    "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",
-    "server": "as.rrp.b2proxy.com:10000",
-    "username": "USER717854-zone-custom-region-JP",
-    "password": "a92a13",
-    "use_local_forward": false,
-    "local_forward_port": 8888
+    "used_ips_file": "output/used_proxy_ips.txt",
+    "mode": "dynamic",
+    "api_url": "https://proxy-api.example.com/gen?region=JP&count=1&proto=http",
+    "timeout_seconds": 15,
+    "check_timeout_seconds": 15,
+    "proxy_quality_check_enabled": true,
+    "proxy_quality_check_timeout_seconds": 10,
+    "proxy_quality_check_max_latency_ms": 2500,
+    "proxy_quality_check_url": "https://accounts.binance.com/zh-CN/login",
+    "bootstrap": {
+      "host": "proxy-bootstrap.example.com",
+      "port": 10000,
+      "username": "PROXY_USERNAME",
+      "password": "PROXY_PASSWORD"
+    },
+    "gost": {
+      "binary": "gost",
+      "listen_host": "127.0.0.1",
+      "listen_port": 0
+    }
   }
 }

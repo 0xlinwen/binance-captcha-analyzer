@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entrypoint.
-
-Use `python captcha_analyzer.py` as before; implementation lives in src/binance_analyzer.
-"""
+"""项目命令行启动入口。"""
 
 import sys
 from pathlib import Path
