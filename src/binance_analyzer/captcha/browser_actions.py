@@ -8,6 +8,26 @@ import time
 from ..utils import dismiss_global_modal
 
 
+def _normalize_captcha_positions(positions) -> list[tuple[int, int]]:
+    """把 AI 返回的网格坐标转换为页面 DOM 使用的 1-3 行列坐标。"""
+    normalized_positions: list[tuple[int, int]] = []
+    parsed_positions: list[tuple[int, int]] = []
+    for position in positions or []:
+        try:
+            row, col = position
+            parsed_positions.append((int(row), int(col)))
+        except (TypeError, ValueError):
+            continue
+
+    is_zero_based = any(row == 0 or col == 0 for row, col in parsed_positions)
+    for row, col in parsed_positions:
+        dom_row = row + 1 if is_zero_based else row
+        dom_col = col + 1 if is_zero_based else col
+        if 1 <= dom_row <= 3 and 1 <= dom_col <= 3:
+            normalized_positions.append((dom_row, dom_col))
+    return normalized_positions
+
+
 def simulate_human_drag(page, slider_element, distance: int) -> bool:
     """模拟人类滑动行为。"""
     try:
@@ -90,7 +110,7 @@ def click_captcha_images(page, positions, click_retry_per_cell: int = 3):
         print("[ERROR] 未找到验证码容器")
         return clicked
 
-    for row, col in positions:
+    for row, col in _normalize_captcha_positions(positions):
         full_selector = f".bcap-modal .bcap-image{row}{col}, .bcapc-popup .bcap-image{row}{col}"
         success = False
         last_err = "element_not_clickable"

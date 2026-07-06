@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
+from binance_analyzer.captcha.browser_actions import _normalize_captcha_positions
 from binance_analyzer.captcha.prompts import build_click_captcha_prompt, build_slider_captcha_prompt
 from binance_analyzer.captcha.service import CaptchaService
 from binance_analyzer.captcha.solvers import (
@@ -45,8 +46,9 @@ class CaptchaLibraryTests(unittest.TestCase):
 
         self.assertIn("选择猫", click_prompt)
         self.assertIn("3x3", click_prompt)
-        self.assertIn("这是一个滑块验证码图片", slider_prompt)
-        self.assertIn("缺口的位置（X 坐标）", slider_prompt)
+        self.assertIn("第1行第1列", click_prompt)
+        self.assertIn("320px", slider_prompt)
+        self.assertIn("缺口左边缘", slider_prompt)
 
     @patch("binance_analyzer.captcha.service.detect_captcha_type")
     def test_service_returns_status_when_captcha_disappears_stably(self, mock_detect_captcha_type) -> None:
@@ -102,6 +104,11 @@ class CaptchaLibraryTests(unittest.TestCase):
         ClickCaptchaSolver()._submit_click_captcha(page)
 
         page.keyboard.press.assert_called_once_with("Enter")
+
+    def test_click_positions_support_legacy_zero_based_prompt(self) -> None:
+        positions = _normalize_captcha_positions([[0, 2], [1, 0], [2, 0], [2, 1]])
+
+        self.assertEqual(positions, [(1, 3), (2, 1), (3, 1), (3, 2)])
 
     def test_checkbox_solver_rejects_found_without_coordinates(self) -> None:
         captcha_element = Mock()
