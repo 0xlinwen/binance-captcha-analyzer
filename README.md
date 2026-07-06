@@ -5,7 +5,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 ## 核心功能
 
 - 自动登录/注册 Binance 账号
-- AI 识别滑块验证码和点击验证码（通过 OpenRouter API）
+- AI 识别复选框、点击图片和滑块验证码（通过 OpenRouter API）
 - IMAP 自动提取邮箱 MFA 验证码（支持 Outlook API 拉码）
 - 多进程并发处理多个账号
 - 本地静态资源缓存（减少网络流量）
@@ -33,7 +33,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│                  flows.py (状态机)                        │
+│          login_flow.py / register_flow.py (状态机)        │
 │            login_with_url_state (登录)                   │
 │            register_with_url_state (注册)                │
 │                                                         │
@@ -73,7 +73,7 @@ src/binance_analyzer/
     detector.py                         # 页面验证码类型检测
     prompts.py                          # AI 验证码识别提示词模板
     ai_client.py                        # OpenRouter AI 调用与 JSON 解析
-    solvers.py                          # click/slider solver 与注册表
+    solvers.py                          # checkbox/click/slider solver 与注册表
     service.py                          # 验证码求解主循环
   email_imap.py                        # IMAP 邮件验证码提取 + Outlook API 拉码
   account_storage.py                   # 账号队列与成功/失败结果文件
@@ -113,7 +113,7 @@ playwright install chromium
 依赖：
 - `playwright` - 浏览器自动化
 - `requests` - OpenRouter API / Outlook 邮件 API 调用
-- `opencv-python` + `numpy` - 验证码截图调试标注
+- `opencv-python` + `numpy` - 历史验证码图像处理依赖，当前主流程不直接依赖其完成坐标点击
 - `psutil` - 进程管理（信号处理时终止子进程）
 
 ## 配置
@@ -189,13 +189,18 @@ cp config.example.json config.json
     "start_url": "https://accounts.binance.com/zh-CN/login"
   },
 
+  // === 注册 ===
+  "register": {
+    "submit_error_ack_max_attempts": 3     // 注册提交错误弹窗最多确认并重试次数
+  },
+
   // === 验证码 ===
   "captcha": {
     "retry_mode": "fast",                  // fast: 快速重试
-    "max_attempts_per_round": 5,           // 每轮最大尝试次数（默认 5）
-    "max_rounds": 3,                       // 最大轮次（默认 3，每轮重新加载页面）
-    "cooldown_on_risk_min_sec": 20,        // 风控冷却最小秒数
-    "cooldown_on_risk_max_sec": 60,        // 风控冷却最大秒数
+    "max_attempts_per_round": 1,           // 每轮最大尝试次数
+    "max_rounds": 3,                       // 最大轮次
+    "cooldown_on_risk_min_sec": 30,        // 风控冷却最小秒数
+    "cooldown_on_risk_max_sec": 90,        // 风控冷却最大秒数
     "click_retry_per_cell": 3              // 点击验证码单格重试次数
   },
 
@@ -204,19 +209,35 @@ cp config.example.json config.json
     "submit_retry": 2,                     // MFA 提交重试次数
     "not_registered_keywords": [           // 未注册关键词
       "未注册", "账号不存在", "account does not exist", "not registered", "没有账号"
-    ]
+    ],
+    "email_verification_enabled": true      // false 时到邮箱验证码页即停止，账号保留在队列
+  },
+
+  // === OpenRouter AI 请求代理 ===
+  "ai_proxy": {
+    "enabled": false,                       // 仅代理 AI 请求，不等于浏览器业务代理；需要时改为 true
+    "bootstrap": {
+      "host": "proxy-bootstrap.example.com",
+      "port": 10000,
+      "username": "PROXY_USERNAME",
+      "password": "PROXY_PASSWORD"
+    }
   }
 }
 ```
 
 ### 账号文件格式
 
-`accounts.txt`，每行一个账号：
+`accounts.txt`，每行一个账号，支持三种格式：
 
 ```
 email1@example.com:password1
 email2@example.com:password2
+email3@example.com----password3
+email4@outlook.com----password4----client_id----refresh_token
 ```
+
+四段格式用于 Microsoft OAuth + IMAP，登录 Binance 时仍使用第二段 `password4`，第三/四段只用于邮箱验证码拉取。
 
 ## 运行
 
@@ -232,15 +253,21 @@ python main.py --refresh-cache
 
 ## 代理配置
 
+### AI 请求代理
+
+`ai_proxy` 只用于 OpenRouter 验证码识别请求，不影响浏览器访问 Binance 的出口 IP。`config.example.json` 默认关闭该能力；如果需要代理 OpenRouter，请把 `ai_proxy.enabled` 改为 `true` 并填入真实代理。
+
 ### 代理模式
 
-支持两种代理模式，统一使用 subprocess 启动浏览器（无 `--enable-automation` 特征）：
+支持以下代理模式，统一使用 subprocess 启动浏览器（无 `--enable-automation` 特征）：
 
 | 模式 | 配置 | 说明 |
 |------|------|------|
 | 动态 IP + 本地 gost 转发 | `mode: dynamic` + `gost` | 通过本地 gost 转发，无需白名单 |
-| 动态 IP 直连 | `mode: dynamic` 且不配置 `gost` | 本机 IP 需在白名单，直接使用动态 IP |
+| 动态 IP 直连 | `mode: dynamic` + `gost.binary: "__disabled_gost__"` | 本机 IP 需在白名单，直接使用动态 IP |
 | 静态代理 | `mode: static` | 直接使用静态代理，可带认证 |
+
+注意：当前配置解析会给 `gost.binary` 补默认值 `gost`。如果动态代理要直连，不要只删除 `gost` 配置，需要显式设置 `gost.binary` 为 `__disabled_gost__`。
 
 ### 安装 gost
 
@@ -314,6 +341,11 @@ gost -L=http://:8888 -F=http://PROXY_USERNAME:PROXY_PASSWORD@proxy-bootstrap.exa
     "port": 10000,
     "username": "PROXY_USERNAME",
     "password": "PROXY_PASSWORD"
+  },
+  "gost": {
+    "binary": "__disabled_gost__",
+    "listen_host": "127.0.0.1",
+    "listen_port": 0
   }
 }
 ```
@@ -446,7 +478,7 @@ FINGERPRINT_PROFILES = [
 **预热流程：**
 1. 访问登录页 `https://accounts.binance.com/zh-CN/login`
 2. 等待页面加载，下载静态资源
-3. 访问注册页 `https://www.binance.com/zh-CN/register`
+3. 访问注册页 `https://accounts.binance.com/zh-CN/register`
 4. 等待页面加载
 5. 清除 Cookie（保留缓存）
 6. 关闭浏览器
@@ -506,14 +538,37 @@ MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 | `AccountStatus.ALREADY_REGISTERED` | 账号已注册 | 不重试，计入已注册数 |
 | `AccountStatus.AUTH_FAILED` | 平台认证失败 | 不重试，计入认证失败数 |
 | `AccountStatus.IMAP_AUTH_FAILED` | IMAP 认证失败 | 不重试，计入 IMAP 失败数 |
+| `AccountStatus.EMAIL_VERIFICATION_REQUIRED` | 已到邮箱验证码页但配置关闭自动取码 | 不计失败，账号保留队列 |
 
 ---
 
 ## AI 验证码识别
 
-通过 OpenRouter API 调用视觉 AI 模型识别验证码，支持两种类型：
+通过 OpenRouter API 调用视觉 AI 模型识别验证码，当前通过 `src/binance_analyzer/captcha/` 独立库扩展，支持三种类型：
 
-### 1. 点击验证码（3x3 图片网格）
+### 1. 复选框验证码
+
+**识别流程：**
+1. 检测 `.bcapc-popup` 中的“进行人机身份验证”等复选框挑战
+2. 截图验证码容器
+3. 发送截图 + 复选框提示词给 AI
+4. AI 返回复选框中心截图坐标
+5. 按截图尺寸和页面元素尺寸换算为页面坐标
+6. 点击复选框并等待验证码稳定消失
+
+**AI 返回格式：**
+```json
+{"found": true, "x": 408, "y": 494}
+```
+
+真实注册链路已验证过坐标换算与点击路径，日志形态如下：
+
+```text
+[复选框] AI 坐标(408,494) -> 页面(204.0,247.0)
+[验证码] checkbox 验证码通过!
+```
+
+### 2. 点击验证码（3x3 图片网格）
 
 **识别流程：**
 1. 截图验证码容器（`.bcap-modal`）
@@ -528,7 +583,7 @@ MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 {"positions": [[1,2], [2,3], [3,1]]}
 ```
 
-### 2. 滑块验证码
+### 3. 滑块验证码
 
 **识别流程：**
 1. 截图滑块背景图（`.bs-main-image`）
@@ -561,15 +616,17 @@ time.sleep(random.uniform(0.01, 0.03))
 
 ### 验证码重试策略
 
-- 每轮最多 `max_attempts_per_round` 次尝试（默认 5）
-- 最多 `max_rounds` 轮（默认 3，每轮重新加载页面）
+- 每轮最多 `max_attempts_per_round` 次尝试
+- 最多 `max_rounds` 轮
 - AI 调用失败自动重试 3 次，带指数退避
-- 检测到风控签名时冷却 20-60 秒
+- 检测到风控签名时按 `cooldown_on_risk_min_sec` / `cooldown_on_risk_max_sec` 冷却
 - 验证码消失需连续检测确认
 
 ---
 
 ## 邮箱验证码
+
+当 `mfa.email_verification_enabled` 为 `false` 时，流程到 `/register/verification` 或 `verification-new-register` 会停止并返回 `AccountStatus.EMAIL_VERIFICATION_REQUIRED`。这种状态不写入失败账号文件，也不会从账号队列移除，适合只验收到邮箱验证码页的注册测试。
 
 ### IMAP 模式
 
@@ -587,6 +644,16 @@ time.sleep(random.uniform(0.01, 0.03))
 - 永久性错误（密码错误等）连续 3 次后停止
 - 从 subject 和 content 中提取验证码
 
+### Microsoft OAuth + IMAP 模式
+
+账号文件使用四段格式时启用 OAuth + IMAP：
+
+```text
+email@outlook.com----login_password----client_id----refresh_token
+```
+
+其中 `login_password` 用于 Binance 登录/注册，`client_id` 和 `refresh_token` 只用于邮箱 IMAP 认证。
+
 ---
 
 ## 本地缓存系统
@@ -601,7 +668,7 @@ time.sleep(random.uniform(0.01, 0.03))
 
 | 特性 | `cache.enabled: true` | `cache.enabled: false` |
 |------|----------------------|------------------------|
-| 浏览器启动 | `launch` + `new_context` | `launch` + `new_context` |
+| 浏览器启动 | subprocess + CDP 连接 | subprocess + CDP 连接 |
 | 请求拦截 | `page.route("**/*")` | 无 |
 | 静态资源缓存 | `route.fulfill()` 本地返回 | 无 |
 
@@ -654,7 +721,7 @@ IP 被风控，解决方案：
 
 ### 验证码识别失败
 
-- 检查 `debug/` 目录的截图确认 AI 识别结果
+- 查看控制台日志中的验证码类型、AI 返回 JSON 和坐标换算信息
 - 尝试更换 AI 模型
 - 增加 `max_attempts_per_round` 和 `max_rounds`
 

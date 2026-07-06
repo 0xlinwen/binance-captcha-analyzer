@@ -48,7 +48,7 @@
     "enabled": true
   },
   "ai_proxy": {
-    "enabled": true,
+    "enabled": false,
     "bootstrap": {
       "host": "proxy-bootstrap.example.com",
       "port": 10000,

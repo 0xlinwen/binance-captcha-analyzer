@@ -41,7 +41,7 @@ python main.py --refresh-cache
 - 浏览器：需要安装 Playwright Chromium。
 - 必需配置：`config.json`，可从 `config.example.json` 复制。
 - 必需凭证：`OPENROUTER_API_KEY` 或 `config.json.openrouter_api_key`。
-- 账号文件：`accounts_file` 指向的文本文件，每行支持 `email:password` 或 `email----password`。
+- 账号文件：`accounts_file` 指向的文本文件，每行支持 `email:password`、`email----password` 或 `email----password----client_id----refresh_token`。
 
 ## 重要技术决策
 
@@ -52,6 +52,8 @@ python main.py --refresh-cache
 - 账号密码在本项目中属于账号复用所需数据，不做脱敏清理。`registered_accounts.json`、成功/失败账号队列文件均保留完整凭据。
 - 配置错误和显式启用的核心依赖缺失必须 fail-fast。已移除的兜底包括：代理预热失败后直连、未知 mode 自动当 login、gost 配置缺失后静默直连、找不到邮箱输入框时填写第一个文本框、全局弹窗无法点击时用 JS 强行隐藏。
 - 动态代理必须配置 `proxy.bootstrap`，不支持无 bootstrap 直连请求代理 API；代理布尔配置只接受 JSON bool，不接受 `"true"` / `"false"` 字符串。
+- `ai_proxy` 只代理 OpenRouter 验证码识别请求，不影响浏览器访问 Binance 的业务代理；示例配置默认关闭，需要时显式设置 `ai_proxy.enabled=true` 并替换真实代理。
+- 动态代理直连需要显式设置 `proxy.gost.binary="__disabled_gost__"`；仅删除 `gost` 配置会被配置解析补回默认 `gost`。
 - 登录/注册核心页面动作必须显式成功：输入邮箱、输入密码、点击继续、勾选协议失败时立即返回失败，不做 JS 扫按钮、回车提交、点击页面中心等宽泛兜底。
 - 新增验证码类型时，直接扩展 `src/binance_analyzer/captcha/`：新增 `CaptchaType`、提示词模板、检测规则、对应 solver，并注册到 `build_default_solver_registry()`。验证码求解结果使用 `CaptchaSolveStatus`，由流程层映射到账号状态。
 
