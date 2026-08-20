@@ -97,6 +97,21 @@ class ConfigTests(unittest.TestCase):
 
             self.assertTrue(config["mfa"]["email_verification_enabled"])
 
+    def test_load_config_defaults_creator_api_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir)
+            config = load_config(base_dir)
+            self.assertFalse(config["creator_api"]["enabled"])
+            self.assertEqual(config["creator_api"]["max_accounts"], 1)
+
+    def test_load_config_rejects_invalid_creator_api_max_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir, creator_api={"enabled": True, "max_accounts": 0})
+            with self.assertRaisesRegex(ValueError, "creator_api.max_accounts"):
+                load_config(base_dir)
+
     def test_load_config_rejects_non_bool_email_verification_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)

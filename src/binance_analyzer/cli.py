@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import load_config
 from .orchestrator import register_account, warmup_cache, MASTER_CACHE_DIR, CACHE_DIR
+from .creator_api_quota import initialize_creator_api_quota
 from .account_storage import (
     append_account_result,
     load_accounts,
@@ -176,6 +177,7 @@ def main():
         return
 
     accounts = load_accounts(base_dir, config["accounts_file"])
+    initialize_creator_api_quota(base_dir, config)
 
     runtime_cfg = config.get("runtime", {})
     max_workers = config.get("max_workers", runtime_cfg["max_workers_default"])

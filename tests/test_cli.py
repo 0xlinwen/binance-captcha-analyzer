@@ -21,6 +21,14 @@ def _runtime_config(max_login_retries: int = 3) -> dict:
 
 
 class CliTests(unittest.TestCase):
+    def test_build_account_tasks_keeps_all_accounts_when_creator_api_is_limited(self) -> None:
+        config = _runtime_config()
+        config["creator_api"] = {"enabled": True, "max_accounts": 1}
+        tasks = build_account_tasks(Path("/tmp/project"), [("a@example.com", "p1"), ("b@example.com", "p2")], config)
+        self.assertEqual(len(tasks), 2)
+        self.assertIs(tasks[0][2], config)
+        self.assertIs(tasks[1][2], config)
+
     def test_build_account_tasks_assigns_unique_worker_ids(self) -> None:
         accounts = [(f"user{i}@example.com", "pass") for i in range(8)]
 

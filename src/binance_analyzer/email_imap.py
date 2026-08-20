@@ -842,8 +842,11 @@ def _submit_mfa(page):
         "button:has-text('Confirm')",
         "button:has-text('继续')",
         "button:has-text('Continue')",
+        "button:has-text('下一步')",
+        "button:has-text('Next')",
         "button:has-text('验证')",
         "button:has-text('Verify')",
+        "button[type='submit']",
     ]
     for selector in selectors:
         try:

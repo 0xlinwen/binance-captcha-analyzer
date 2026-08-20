@@ -26,6 +26,9 @@ from .proxy_integration import (
     stop_managed_proxy_runtime,
 )
 from .results import AccountStatus
+from .page_signals import is_dashboard_url
+from .creator_api import api_metadata, extract_creator_api
+from .creator_api_quota import acquire_creator_api_slot, release_creator_api_slot
 
 PAGE_TIMEOUT = 60000
 DEFAULT_USED_PROXY_IPS_FILE = "output/used_proxy_ips.txt"
@@ -380,7 +383,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                 try:
                     page.goto(dashboard_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
                     page.wait_for_timeout(random.randint(2000, 3000))
-                    if "/my/dashboard" in page.url or "/my/" in page.url:
+                    if is_dashboard_url(page.url):
                         dashboard_loaded = True
                         break
                     print(f"[Worker-{worker_id}] dashboard 未完全加载，重试 ({attempt+1}/3)")
@@ -412,6 +415,24 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "mail_api_url":     "https://wrpifa-com.netlify.app/",
                 }
                 save_registered_account(base_dir, output_file, account_data)
+
+                creator_cfg = config.get("creator_api", {})
+                if creator_cfg.get("enabled"):
+                    slot_token = acquire_creator_api_slot(base_dir, config)
+                    if slot_token is None:
+                        print(f"[Worker-{worker_id}] 创作者 API 已达到本次提取配额，跳过")
+                    else:
+                        print(f"\n[Worker-{worker_id}] 提取创作者中心 API...")
+                        try:
+                            creator_api_key = extract_creator_api(page, config, page_timeout=PAGE_TIMEOUT)
+                            account_data.update(api_metadata(creator_api_key))
+                            save_registered_account(base_dir, output_file, account_data)
+                        except Exception as exc:
+                            release_creator_api_slot(base_dir, config, slot_token, completed=False)
+                            print(f"[Worker-{worker_id}] 创作者 API 提取失败，Cookie 已保存: {exc}")
+                        else:
+                            release_creator_api_slot(base_dir, config, slot_token, completed=True)
+                            print(f"[Worker-{worker_id}] API 提取成功（已隐藏密钥）")
                 print(f"\n[Worker-{worker_id}] 处理成功: {email_addr}")
                 return AccountStatus.SUCCESS
 

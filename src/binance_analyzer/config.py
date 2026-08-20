@@ -94,6 +94,22 @@ def _normalize_register_config(config: dict) -> None:
     )
 
 
+def _normalize_creator_api_config(config: dict) -> None:
+    creator = config.get("creator_api")
+    if creator is None:
+        creator = {}
+        config["creator_api"] = creator
+    if not isinstance(creator, dict):
+        raise ValueError("配置 creator_api 必须是对象")
+    if "enabled" not in creator:
+        creator["enabled"] = False
+    _require_bool(creator, "enabled")
+    creator["max_accounts"] = _positive_int(creator.get("max_accounts", 1), key="creator_api.max_accounts")
+    creator["slot_wait_timeout_sec"] = _positive_int(
+        creator.get("slot_wait_timeout_sec", 600), key="creator_api.slot_wait_timeout_sec"
+    )
+
+
 def load_config(base_dir: Path) -> dict:
     """读取配置并补齐当前版本的运行默认值。"""
     config_path = base_dir / "config.json"
@@ -112,6 +128,7 @@ def load_config(base_dir: Path) -> dict:
     login_config = _require_dict(config, "login")
     _require_text(login_config, "start_url")
     _normalize_register_config(config)
+    _normalize_creator_api_config(config)
 
     _normalize_captcha_config(config)
 
