@@ -25,6 +25,11 @@
   "register": {
     "submit_error_ack_max_attempts": 3
   },
+  "creator_api": {
+    "enabled": false,
+    "max_accounts": 1,
+    "slot_wait_timeout_sec": 600
+  },
   "captcha": {
     "retry_mode": "fast",
     "max_attempts_per_round": 1,

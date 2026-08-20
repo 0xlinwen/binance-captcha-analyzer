@@ -4,7 +4,12 @@
 
 - 目标：自动化处理 Binance 登录/注册流程，包含浏览器自动化、验证码识别、邮箱验证码提取、代理运行时和结果持久化。
 - 当前进展：主流程已按入口层、编排层、登录/注册流程、动作/验证码/邮箱/存储能力模块拆分；代理能力已抽为 `src/proxy_forwarder` 可复用包。
-- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象，降低状态机维护成本。
+- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象，降低状态机维护成本；用真实登录复测创作者中心 API 提取（点击入口 + 弹窗读密钥）。
+- 最近完成：登录/注册成功后的 Dashboard 判定改为使用 `page_signals.is_dashboard_url()`；Creator API 入口点击后会等待导航并切换到新打开的 tab，避免在旧页面读取密钥。
+- 最近实测：2026-08-20 真实登录 `accounts.txt` 中的 2 个账号均通过邮箱 MFA 并写入 Cookie/CSRF；Creator Center 页面实际按钮文案为“创建 API 密钥”，已加入提取入口选择器。因成功账号已从队列移除，修复后的 API 真实读取尚未复测。
+- 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `output/creator_api_debug/` 截图与文本并失败，不再从整页文本猜值。已清理 `output/registered_accounts.json` 中错误 API 字段。
+- 最近实测：2026-08-20 对 `tommimjr0@outlook.com` 执行真实登录时，在登录页滑块验证码阶段被弹窗拦截，流程返回 `AUTH_FAILED`，未进入 Creator Center，未生成 API 调试截图；账号已写入 `output/failed_accounts.txt`，需重新加入待处理队列后再测。
+- 最近修复：创作者中心进页后无点击、弹窗已有密钥仍失败。入口「查看 API >」无法 exact 匹配；新手引导层会挡住点击；密钥是「API 密钥」标签后的纯文本而不是 input。提取器改为包含匹配、先关引导、禁止 `networkidle` 空等，并按标签读取密钥。真实页面点击尚未复测。
 
 ## 架构约定
 
@@ -21,6 +26,8 @@
 - `src/binance_analyzer/account_storage.py`：账号队列与成功/失败账号结果文件。
 - `src/binance_analyzer/proxy_ip_storage.py`：代理出口 IP 使用记录。
 - `src/binance_analyzer/registered_account_storage.py`：`registered_accounts.json` 持久化，完整保存账号凭据供后续复用。
+- `src/binance_analyzer/creator_api.py`：创作者中心 API 提取；`CreatorCenterApiExtractor` 负责关引导、点入口和按「API 密钥」标签读值。
+- `src/binance_analyzer/creator_api_quota.py`：单次运行 API 提取名额，失败释放、成功占用。
 - `src/binance_analyzer/screenshot_storage.py`：截图清理。
 - `src/proxy_forwarder/`：代理解析、质量检查、本地转发和运行时管理的可复用包；`proxy_utils.py` 放纯代理解析/格式化工具，业务代码通过 `proxy_integration.py` 适配。
 
@@ -57,6 +64,8 @@ python main.py --refresh-cache
 - 登录/注册核心页面动作必须显式成功：输入邮箱、输入密码、点击继续、勾选协议失败时立即返回失败，不做 JS 扫按钮、回车提交、点击页面中心等宽泛兜底。
 - 新增验证码类型时，直接扩展 `src/binance_analyzer/captcha/`：新增 `CaptchaType`、提示词模板、检测规则、对应 solver，并注册到 `build_default_solver_registry()`。验证码求解结果使用 `CaptchaSolveStatus`，由流程层映射到账号状态。
 - 主流程浏览器改为本机 Google Chrome（`get_local_chrome_path()`），不再使用 Playwright 自带 Chromium；找不到 Chrome 时 fail-fast，禁止静默回退。
+- 创作者中心 API 提取由 `creator_api.enabled` 开关控制，`creator_api.max_accounts` 限制单次运行前 N 个账号；结果写入 `registered_accounts.json` 的 `api_key` 与 `api_extracted_at` 字段，默认关闭。
+- `creator_api.max_accounts` 表示单次运行累计成功提取的 API 数，不限制登录/注册账号数量；并发任务通过输出目录配额状态文件协调，提取失败会释放名额供后续成功账号补位。
 
 ## 踩坑记录
 
@@ -87,3 +96,15 @@ python main.py --refresh-cache
 - 现象：复选框验证码点击后没有继续确认验证结果，表现为验证码弹窗被关闭或重新出现，但没有按当前验证码类型重新截图提交给 AI。
   原因：复选框验证码会消耗 `captcha.max_attempts_per_round` 的唯一尝试次数，服务层在确认复选框验证结果前就结束本轮。
   解决方案：验证码服务层按当前类型循环检测；复选框本身也作为独立验证码类型截图识别并使用复选框提示词提交给 AI，复选框尝试次数与图片/滑块挑战次数分开统计，点击后等待验证结果，再按最新检测到的类型继续处理。
+
+- 现象：2026-08-20 实测登录 MFA 已读到邮件验证码，但页面提交按钮未命中。
+  原因：MFA 页面使用“下一步”或原生 `button[type=submit]`，旧选择器只覆盖提交/确认/继续/验证文本。
+  解决方案：仅在 MFA 提交函数中补充 `下一步`、`Next` 和 `button[type=submit]`，不使用回车或页面宽泛点击。
+
+- 现象：登录成功后可能误把带有 `return_to=/my/dashboard` 的登录 URL 当作 Dashboard，或 Creator API 入口打开新 tab 后仍在旧页面读取。
+  原因：Dashboard 使用整串 URL 包含判断；Creator API 提取未等待入口点击后的导航/弹窗页面。
+  解决方案：Dashboard 统一调用 `is_dashboard_url()` 解析 hostname/path；Creator API 点击入口后等待页面稳定并选择新 tab。
+
+- 现象：打开创作者中心后页面停住，看不到点击，随后直接失败；有时弹窗已经显示密钥仍报未找到。
+  原因：入口文案是「查看 API >」，exact 匹配失败；`a,button` 全量扫描很慢且点不到普通 div；新手引导层拦截指针；广场页 `networkidle` 会空等满超时；密钥在「API 密钥」下方的文本节点，不在 input 里。
+  解决方案：按包含文案点入口，先点「跳过」关掉引导，不等 networkidle，只从「API 密钥 / API Key」标签后读取 16–64 位密钥，继续排除 `Square-Creator-*` 用户名。
