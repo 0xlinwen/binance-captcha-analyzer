@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+import os
+import platform
 import random
 import shutil
 import socket
 import subprocess
 import time
 import urllib.parse
+from pathlib import Path
 
-_CHROMIUM_PATH = None
+# 主流程使用本机 Google Chrome；缺失时 fail-fast，禁止静默回退到 Playwright Chromium
+_LOCAL_CHROME_PATH: str | None = None
+
+# 常见本机 Chrome 路径（按平台）
+_LOCAL_CHROME_CANDIDATES: tuple[str, ...] = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+)
 
 
 def cleanup_subprocess_browser(browser=None, chrome_process=None, user_data_dir=None) -> None:
@@ -37,19 +54,43 @@ def cleanup_subprocess_browser(browser=None, chrome_process=None, user_data_dir=
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
-def get_chromium_path():
-    """获取 Playwright Chromium 可执行文件路径（懒加载）"""
-    global _CHROMIUM_PATH
-    if _CHROMIUM_PATH is None:
-        import subprocess as _sp
-        result = _sp.run(
-            ['python3', '-c', 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()'],
-            capture_output=True, text=True
-        )
-        _CHROMIUM_PATH = result.stdout.strip()
-        if not _CHROMIUM_PATH:
-            raise RuntimeError(f"无法获取 Chromium 路径: {result.stderr}")
-    return _CHROMIUM_PATH
+def get_local_chrome_path() -> str:
+    """获取本机 Google Chrome 可执行文件路径（懒加载，缺失则报错）。"""
+    global _LOCAL_CHROME_PATH
+    if _LOCAL_CHROME_PATH is not None:
+        return _LOCAL_CHROME_PATH
+
+    env_path = str(os.environ.get("CHROME_PATH") or os.environ.get("GOOGLE_CHROME_BIN") or "").strip()
+    candidates: list[str] = []
+    if env_path:
+        candidates.append(env_path)
+    candidates.extend(_LOCAL_CHROME_CANDIDATES)
+
+    # macOS/Linux 额外尝试 which
+    if platform.system() != "Windows":
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+
+    seen: set[str] = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if Path(path).is_file() and os.access(path, os.X_OK):
+            _LOCAL_CHROME_PATH = path
+            return _LOCAL_CHROME_PATH
+
+    raise RuntimeError(
+        "未找到本机 Google Chrome。请安装 Chrome，或设置环境变量 CHROME_PATH "
+        "指向可执行文件（例如 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome）"
+    )
+
+
+def get_chromium_path() -> str:
+    """兼容旧调用名：返回本机 Chrome 路径。"""
+    return get_local_chrome_path()
 
 def find_free_port():
     """找一个可用的端口"""
@@ -540,7 +581,7 @@ def get_launch_args(screen_width: int, screen_height: int) -> list:
 def build_stealth_context(p, fingerprint: dict, proxy_settings, headless: bool):
     """
     创建 browser + context + 注入脚本。
-    统一使用 subprocess 启动（不带 --enable-automation），更隐蔽。
+    统一用 subprocess 启动本机 Google Chrome（不带 --enable-automation）。
     """
     viewport_height = fingerprint['screen_height'] - 80
     browser, context, page = build_stealth_context_subprocess(
@@ -555,10 +596,10 @@ def build_stealth_context(p, fingerprint: dict, proxy_settings, headless: bool):
 
 
 def build_stealth_context_subprocess(p, fingerprint, proxy_settings, headless, viewport_height):
-    """subprocess 启动 Chromium，不带 --enable-automation。"""
+    """subprocess 启动本机 Google Chrome，不带 --enable-automation。"""
     import tempfile
     port = find_free_port()
-    chromium_path = p.chromium.executable_path
+    chrome_path = get_local_chrome_path()
     user_data_dir = tempfile.mkdtemp(prefix='pw_chrome_')
     chrome_process = None
     browser = None
@@ -580,7 +621,7 @@ def build_stealth_context_subprocess(p, fingerprint, proxy_settings, headless, v
 
     # 最小化启动参数，不加 --enable-automation
     cmd = [
-        chromium_path,
+        chrome_path,
         f'--remote-debugging-port={port}',
         f'--user-data-dir={user_data_dir}',
         '--disable-blink-features=AutomationControlled',
@@ -600,7 +641,7 @@ def build_stealth_context_subprocess(p, fingerprint, proxy_settings, headless, v
         cmd.append(f'--proxy-server={proxy_server}')
 
     try:
-        # 启动 Chromium 进程
+        # 启动本机 Chrome 进程
         chrome_process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
