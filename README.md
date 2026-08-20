@@ -5,7 +5,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 ## 核心功能
 
 - 自动登录/注册 Binance 账号
-- AI 识别滑块验证码和点击验证码（通过 OpenRouter API）
+- AI 识别复选框、点击图片和滑块验证码（通过 OpenRouter API）
 - IMAP 自动提取邮箱 MFA 验证码（支持 Outlook API 拉码）
 - 多进程并发处理多个账号
 - 本地静态资源缓存（减少网络流量）
@@ -33,7 +33,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│                  flows.py (状态机)                        │
+│          login_flow.py / register_flow.py (状态机)        │
 │            login_with_url_state (登录)                   │
 │            register_with_url_state (注册)                │
 │                                                         │
@@ -45,36 +45,42 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
         │                  │                  │
         ▼                  ▼                  ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
-│ web_actions  │  │captcha_solver│  │   email_imap     │
-│ 页面交互动作  │  │ 验证码执行    │  │ IMAP邮件验证码    │
-│ 输入/点击/   │  │ 滑块/点击    │  │ Outlook API拉码  │
-│ 跳转/弹窗    │  │ 重试/冷却    │  │ 提取/填充/提交    │
-└──────────────┘  └──────┬───────┘  └──────────────────┘
-                         │
-                         ▼
-                  ┌──────────────┐
-                  │  captcha_ai  │
-                  │ OpenRouter   │
-                  │ AI 视觉识别   │
-                  └──────────────┘
+│ web_actions  │  │   captcha/   │  │   email_imap     │
+│ 页面交互动作  │  │ 可扩展验证码库 │  │ IMAP邮件验证码    │
+│ 输入/点击/   │  │ 检测/提示词/  │  │ Outlook API拉码  │
+│ 跳转/弹窗    │  │ solver/AI客户端│  │ 提取/填充/提交    │
+└──────────────┘  └──────────────┘  └──────────────────┘
 ```
 
 ## 项目结构
 
 ```
-main.py                                # 兼容入口
+main.py                                # 命令行启动入口
 src/binance_analyzer/
   __init__.py
   cli.py                               # 主入口、并发调度、信号处理、缓存预热
   config.py                            # 配置加载与默认值
-  orchestrator.py                      # 单账号编排（浏览器启动、缓存、Cookie提取）
-  flows.py                             # 登录/注册状态机（URL驱动）
+  orchestrator.py                      # 单账号编排（代理、浏览器、流程、Cookie）
+  browser_context.py                   # 浏览器上下文、反检测脚本、subprocess 启动
+  flows.py                             # 登录/注册共享状态机工具
+  login_flow.py                        # 登录流程状态机
+  register_flow.py                     # 注册流程状态机
+  results.py                           # 账号处理状态模型
+  page_signals.py                      # URL、风控、代理失败等页面信号检测
   web_actions.py                       # 页面交互（输入邮箱/密码、点击按钮、弹窗处理）
-  captcha_solver.py                    # 验证码执行（滑块拖动、点击图片、重试策略）
-  captcha_ai.py                        # OpenRouter AI 调用与 JSON 解析
-  prompts.py                            # AI 验证码识别提示词模板
+  captcha/                              # 可扩展验证码库
+    types.py                            # 验证码类型与上下文
+    detector.py                         # 页面验证码类型检测
+    prompts.py                          # AI 验证码识别提示词模板
+    ai_client.py                        # OpenRouter AI 调用与 JSON 解析
+    solvers.py                          # checkbox/click/slider solver 与注册表
+    service.py                          # 验证码求解主循环
   email_imap.py                        # IMAP 邮件验证码提取 + Outlook API 拉码
-  storage.py                           # 账号文件读取、结果写入（文件锁）
+  account_storage.py                   # 账号队列与成功/失败结果文件
+  proxy_ip_storage.py                  # 代理出口 IP 使用记录
+  registered_account_storage.py        # registered_accounts.json 持久化
+  screenshot_storage.py                # 截图清理
+  proxy_integration.py                 # 业务层代理运行时适配
   local_cache.py                       # 应用层静态资源缓存
   traffic_monitor.py                   # 流量统计（按类型/域名/请求）
   fingerprint.py                       # 浏览器指纹随机化（UA/时区/WebGL）
@@ -82,10 +88,15 @@ src/binance_analyzer/
   constants.py                         # 全局常量（超时、重试、日志格式等）
   utils.py                             # 工具函数（重试策略、弹窗处理、文件名清理）
   exceptions.py                        # 自定义异常层级（可重试/不可重试分类）
+src/proxy_forwarder/
+  config.py                            # 代理配置解析与质量检查配置
+  proxy_utils.py                       # 代理文本解析、URL 构建、客户端配置
+  runtime.py                           # 代理探测、动态代理获取、gost 生命周期
+  logging.py                           # 代理运行时日志
 output/
   success_accounts.txt                 # 成功的账号
   failed_accounts.txt                  # 失败的账号
-  registered_accounts.json             # 成功账号的 Cookie 和 CSRF Token
+  registered_accounts.json             # 成功账号的完整凭据、Cookie 和 CSRF Token
   logs/
     binance_YYYY-MM-DD.log             # 每日主日志
     success/YYYY-MM-DD.log             # 当日成功账号列表
@@ -102,7 +113,7 @@ playwright install chromium
 依赖：
 - `playwright` - 浏览器自动化
 - `requests` - OpenRouter API / Outlook 邮件 API 调用
-- `opencv-python` + `numpy` - 验证码截图调试标注
+- `opencv-python` + `numpy` - 历史验证码图像处理依赖，当前主流程不直接依赖其完成坐标点击
 - `psutil` - 进程管理（信号处理时终止子进程）
 
 ## 配置
@@ -126,13 +137,22 @@ cp config.example.json config.json
   "output_file": "output/registered_accounts.json",  // 输出文件路径
 
   // === 模式 ===
-  "mode": "login",                         // 运行模式：login / register（别名：signup, sign_up）
+  "mode": "login",                         // 运行模式：login / register
   "max_login_retries": 3,                  // 单账号最大重试次数
   "debug_mode": false,                     // 调试模式
 
   // === 浏览器 ===
   "headless": false,                       // 是否无头模式
   "max_workers": 2,                        // 并发进程数
+
+  // === 运行时 ===
+  "runtime": {
+    "max_workers_default": 2,              // 未配置 max_workers 时的默认并发
+    "retry_delay_min_sec": 20,             // 普通重试最小等待秒数
+    "retry_delay_max_sec": 60,             // 普通重试最大等待秒数
+    "proxy_retry_delay_min_sec": 10,       // 代理重试最小等待秒数
+    "proxy_retry_delay_max_sec": 30        // 代理重试最大等待秒数
+  },
 
   // === 本地缓存 ===
   "cache": {
@@ -142,12 +162,26 @@ cp config.example.json config.json
   // === 代理 ===
   "proxy": {
     "enabled": false,
-    "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?...",  // 动态 IP API
-    "server": "host:port",                 // 认证代理（用于请求动态 API）
-    "username": "",                        // 代理用户名
-    "password": "",                        // 代理密码
-    "use_local_forward": false,            // 是否使用本地 gost 转发
-    "local_forward_port": 8888             // 本地转发端口
+    "used_ips_file": "output/used_proxy_ips.txt",
+    "mode": "dynamic",                     // dynamic / static
+    "api_url": "https://proxy-api.example.com/gen?region=JP&count=1&proto=http",  // 动态 IP API
+    "timeout_seconds": 15,
+    "check_timeout_seconds": 15,
+    "proxy_quality_check_enabled": true,      // 检查目标站点延迟，慢 IP 自动换新
+    "proxy_quality_check_timeout_seconds": 10,
+    "proxy_quality_check_max_latency_ms": 2500,
+    "proxy_quality_check_url": "https://accounts.binance.com/zh-CN/login",
+    "bootstrap": {                         // 用于请求动态 API 的认证代理
+      "host": "host",
+      "port": 10000,
+      "username": "",
+      "password": ""
+    },
+    "gost": {                              // 可选，本地转发层
+      "binary": "gost",
+      "listen_host": "127.0.0.1",
+      "listen_port": 0                      // 0 = 每个账号自动分配空闲端口
+    }
   },
 
   // === 登录 ===
@@ -155,13 +189,18 @@ cp config.example.json config.json
     "start_url": "https://accounts.binance.com/zh-CN/login"
   },
 
+  // === 注册 ===
+  "register": {
+    "submit_error_ack_max_attempts": 3     // 注册提交错误弹窗最多确认并重试次数
+  },
+
   // === 验证码 ===
   "captcha": {
     "retry_mode": "fast",                  // fast: 快速重试
-    "max_attempts_per_round": 5,           // 每轮最大尝试次数（默认 5）
-    "max_rounds": 3,                       // 最大轮次（默认 3，每轮重新加载页面）
-    "cooldown_on_risk_min_sec": 20,        // 风控冷却最小秒数
-    "cooldown_on_risk_max_sec": 60,        // 风控冷却最大秒数
+    "max_attempts_per_round": 1,           // 每轮最大尝试次数
+    "max_rounds": 3,                       // 最大轮次
+    "cooldown_on_risk_min_sec": 30,        // 风控冷却最小秒数
+    "cooldown_on_risk_max_sec": 90,        // 风控冷却最大秒数
     "click_retry_per_cell": 3              // 点击验证码单格重试次数
   },
 
@@ -170,19 +209,35 @@ cp config.example.json config.json
     "submit_retry": 2,                     // MFA 提交重试次数
     "not_registered_keywords": [           // 未注册关键词
       "未注册", "账号不存在", "account does not exist", "not registered", "没有账号"
-    ]
+    ],
+    "email_verification_enabled": true      // false 时到邮箱验证码页即停止，账号保留在队列
+  },
+
+  // === OpenRouter AI 请求代理 ===
+  "ai_proxy": {
+    "enabled": false,                       // 仅代理 AI 请求，不等于浏览器业务代理；需要时改为 true
+    "bootstrap": {
+      "host": "proxy-bootstrap.example.com",
+      "port": 10000,
+      "username": "PROXY_USERNAME",
+      "password": "PROXY_PASSWORD"
+    }
   }
 }
 ```
 
 ### 账号文件格式
 
-`accounts.txt`，每行一个账号：
+`accounts.txt`，每行一个账号，支持三种格式：
 
 ```
 email1@example.com:password1
 email2@example.com:password2
+email3@example.com----password3
+email4@outlook.com----password4----client_id----refresh_token
 ```
+
+四段格式用于 Microsoft OAuth + IMAP，登录 Binance 时仍使用第二段 `password4`，第三/四段只用于邮箱验证码拉取。
 
 ## 运行
 
@@ -198,14 +253,21 @@ python main.py --refresh-cache
 
 ## 代理配置
 
+### AI 请求代理
+
+`ai_proxy` 只用于 OpenRouter 验证码识别请求，不影响浏览器访问 Binance 的出口 IP。`config.example.json` 默认关闭该能力；如果需要代理 OpenRouter，请把 `ai_proxy.enabled` 改为 `true` 并填入真实代理。
+
 ### 代理模式
 
-支持两种代理模式，统一使用 subprocess 启动浏览器（无 `--enable-automation` 特征）：
+支持以下代理模式，统一使用 subprocess 启动浏览器（无 `--enable-automation` 特征）：
 
 | 模式 | 配置 | 说明 |
 |------|------|------|
-| 动态 IP 直连 | `use_local_forward: false` | 本机 IP 需在白名单，直接使用动态 IP |
-| 本地 gost 转发 | `use_local_forward: true` | 通过本地 gost 转发，无需白名单 |
+| 动态 IP + 本地 gost 转发 | `mode: dynamic` + `gost` | 通过本地 gost 转发，无需白名单 |
+| 动态 IP 直连 | `mode: dynamic` + `gost.binary: "__disabled_gost__"` | 本机 IP 需在白名单，直接使用动态 IP |
+| 静态代理 | `mode: static` | 直接使用静态代理，可带认证 |
+
+注意：当前配置解析会给 `gost.binary` 补默认值 `gost`。如果动态代理要直连，不要只删除 `gost` 配置，需要显式设置 `gost.binary` 为 `__disabled_gost__`。
 
 ### 安装 gost
 
@@ -225,7 +287,7 @@ sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
 
 ```bash
 # 格式: gost -L=http://:本地端口 -F=http://用户名:密码@代理服务器:端口
-gost -L=http://:8888 -F=http://TokencChan88:TokencChan88@92.112.110.120:8094
+gost -L=http://:8888 -F=http://PROXY_USERNAME:PROXY_PASSWORD@proxy-bootstrap.example.com:10000
 ```
 
 启动成功后会显示：
@@ -235,37 +297,56 @@ gost -L=http://:8888 -F=http://TokencChan88:TokencChan88@92.112.110.120:8094
 
 ### 配置示例
 
-#### 方式 1：本地 gost 转发（推荐，无需白名单）
-
-先启动 gost，然后配置：
+#### 方式 1：动态 IP + 本地 gost 转发（推荐，无需白名单）
 
 ```json
 "proxy": {
   "enabled": true,
-  "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",
-  "server": "92.112.110.120:8094",
-  "username": "TokencChan88",
-  "password": "TokencChan88",
-  "use_local_forward": true,
-  "local_forward_port": 8888
+  "mode": "dynamic",
+  "api_url": "https://proxy-api.example.com/gen?region=JP&count=1&proto=http",
+  "proxy_quality_check_enabled": true,
+  "proxy_quality_check_max_latency_ms": 2500,
+  "proxy_quality_check_url": "https://accounts.binance.com/zh-CN/login",
+  "bootstrap": {
+    "host": "proxy-bootstrap.example.com",
+    "port": 10000,
+    "username": "PROXY_USERNAME",
+    "password": "PROXY_PASSWORD"
+  },
+  "gost": {
+    "binary": "gost",
+    "listen_host": "127.0.0.1",
+    "listen_port": 0
+  }
 }
 ```
 
 **工作流程：**
-1. 通过 `server`（带认证）请求 `dynamic_api` 获取动态 IP
-2. 浏览器使用 `127.0.0.1:8888` → gost 转发 → 认证代理 → 目标网站
+1. 通过 `bootstrap`（带认证）请求 `api_url` 获取动态 IP
+2. 请求 `proxy_quality_check_url` 检查延迟，超过 `proxy_quality_check_max_latency_ms`（默认 2500ms）则丢弃并继续获取下一个 IP
+3. 浏览器使用自动分配的本地端口 → gost 转发 → 认证代理 → 目标网站
 
 #### 方式 2：动态 IP 直连（需白名单）
 
 ```json
 "proxy": {
   "enabled": true,
-  "dynamic_api": "http://as.rrp.b2proxy.com:8089/gen?zone=custom&ptype=1&region=JP&count=1&proto=http&stype=txt&sessType=rotating",
-  "server": "92.112.110.120:8094",
-  "username": "TokencChan88",
-  "password": "TokencChan88",
-  "use_local_forward": false,
-  "local_forward_port": 8888
+  "mode": "dynamic",
+  "api_url": "https://proxy-api.example.com/gen?region=JP&count=1&proto=http",
+  "proxy_quality_check_enabled": true,
+  "proxy_quality_check_max_latency_ms": 2500,
+  "proxy_quality_check_url": "https://accounts.binance.com/zh-CN/login",
+  "bootstrap": {
+    "host": "proxy-bootstrap.example.com",
+    "port": 10000,
+    "username": "PROXY_USERNAME",
+    "password": "PROXY_PASSWORD"
+  },
+  "gost": {
+    "binary": "__disabled_gost__",
+    "listen_host": "127.0.0.1",
+    "listen_port": 0
+  }
 }
 ```
 
@@ -274,9 +355,10 @@ gost -L=http://:8888 -F=http://TokencChan88:TokencChan88@92.112.110.120:8094
 - 查看本机 IP：`curl ifconfig.me`
 
 **工作流程：**
-1. 通过 `server`（带认证）请求 `dynamic_api` 获取动态 IP
-2. API 返回无认证代理（如 `162.128.86.126:10000`）
-3. 浏览器直接使用动态 IP（本机 IP 已在白名单）
+1. 通过 `bootstrap`（带认证）请求 `api_url` 获取动态 IP
+2. 请求 `proxy_quality_check_url` 检查延迟，超过 `proxy_quality_check_max_latency_ms`（默认 2500ms）则丢弃并继续获取下一个 IP
+3. API 返回无认证代理（如 `162.128.86.126:10000`）
+4. 浏览器直接使用动态 IP（本机 IP 已在白名单）
 
 ---
 
@@ -300,7 +382,7 @@ gost -L=http://:8888 -F=http://TokencChan88:TokencChan88@92.112.110.120:8094
 使用 subprocess 直接启动 Playwright 内置 Chromium，不经过 `chromium.launch()`，避免 Playwright 自动注入 `--enable-automation` 等 30+ 自动化标志：
 
 ```python
-# orchestrator.py - _build_context()
+# browser_context.py - build_stealth_context()
 cmd = [
     chromium_path,                                    # Playwright 内置 Chromium
     f'--remote-debugging-port={port}',
@@ -396,7 +478,7 @@ FINGERPRINT_PROFILES = [
 **预热流程：**
 1. 访问登录页 `https://accounts.binance.com/zh-CN/login`
 2. 等待页面加载，下载静态资源
-3. 访问注册页 `https://www.binance.com/zh-CN/register`
+3. 访问注册页 `https://accounts.binance.com/zh-CN/register`
 4. 等待页面加载
 5. 清除 Cookie（保留缓存）
 6. 关闭浏览器
@@ -419,7 +501,7 @@ FINGERPRINT_PROFILES = [
 
 ### 状态机驱动
 
-`flows.py` 使用 URL 驱动的状态机，每次迭代检查当前 URL 决定执行什么操作：
+`login_flow.py` 与 `register_flow.py` 使用 URL 驱动的状态机，每次迭代检查当前 URL 决定执行什么操作；`flows.py` 只保留两类流程共享的页面判断和状态机辅助函数。
 
 | URL 路径 | 阶段 | 操作 |
 |----------|------|------|
@@ -442,24 +524,51 @@ MAX_CAPTCHA_FAILS = 3       # 验证码最大连续失败次数
 MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 ```
 
-### 返回值说明
+### 账号状态说明
 
-| 返回值 | 含义 | CLI 处理 |
+公开流程与进程池边界统一使用 `AccountStatus`，不再返回 `True` / `False` / 字符串混合协议。
+
+| 状态 | 含义 | CLI 处理 |
 |--------|------|----------|
-| `True` | 成功 | 计入成功数 |
-| `False` | 失败 | 重试（最多 max_login_retries 次） |
-| `"rate_limited"` | IP 被风控 | 不重试 |
-| `"need_register"` | 账号未注册 | 不重试，计入未注册数 |
-| `"already_registered"` | 账号已注册 | 不重试，计入已注册数 |
-| `"imap_auth_failed"` | IMAP 认证失败 | 不重试，计入 IMAP 失败数 |
+| `AccountStatus.SUCCESS` | 成功 | 计入成功数 |
+| `AccountStatus.FAILED` | 失败 | 重试（最多 max_login_retries 次） |
+| `AccountStatus.RATE_LIMITED` | IP 被风控 | 换代理/重建会话重试 |
+| `AccountStatus.PROXY_FAILED` | 代理会话失败 | 换代理/重建会话重试 |
+| `AccountStatus.NEED_REGISTER` | 账号未注册 | 不重试，计入未注册数 |
+| `AccountStatus.ALREADY_REGISTERED` | 账号已注册 | 不重试，计入已注册数 |
+| `AccountStatus.AUTH_FAILED` | 平台认证失败 | 不重试，计入认证失败数 |
+| `AccountStatus.IMAP_AUTH_FAILED` | IMAP 认证失败 | 不重试，计入 IMAP 失败数 |
+| `AccountStatus.EMAIL_VERIFICATION_REQUIRED` | 已到邮箱验证码页但配置关闭自动取码 | 不计失败，账号保留队列 |
 
 ---
 
 ## AI 验证码识别
 
-通过 OpenRouter API 调用视觉 AI 模型识别验证码，支持两种类型：
+通过 OpenRouter API 调用视觉 AI 模型识别验证码，当前通过 `src/binance_analyzer/captcha/` 独立库扩展，支持三种类型：
 
-### 1. 点击验证码（3x3 图片网格）
+### 1. 复选框验证码
+
+**识别流程：**
+1. 检测 `.bcapc-popup` 中的“进行人机身份验证”等复选框挑战
+2. 截图验证码容器
+3. 发送截图 + 复选框提示词给 AI
+4. AI 返回复选框中心截图坐标
+5. 按截图尺寸和页面元素尺寸换算为页面坐标
+6. 点击复选框并等待验证码稳定消失
+
+**AI 返回格式：**
+```json
+{"found": true, "x": 408, "y": 494}
+```
+
+真实注册链路已验证过坐标换算与点击路径，日志形态如下：
+
+```text
+[复选框] AI 坐标(408,494) -> 页面(204.0,247.0)
+[验证码] checkbox 验证码通过!
+```
+
+### 2. 点击验证码（3x3 图片网格）
 
 **识别流程：**
 1. 截图验证码容器（`.bcap-modal`）
@@ -474,7 +583,7 @@ MAX_MFA_RETRIES = 3         # MFA 最大重试次数
 {"positions": [[1,2], [2,3], [3,1]]}
 ```
 
-### 2. 滑块验证码
+### 3. 滑块验证码
 
 **识别流程：**
 1. 截图滑块背景图（`.bs-main-image`）
@@ -507,15 +616,17 @@ time.sleep(random.uniform(0.01, 0.03))
 
 ### 验证码重试策略
 
-- 每轮最多 `max_attempts_per_round` 次尝试（默认 5）
-- 最多 `max_rounds` 轮（默认 3，每轮重新加载页面）
+- 每轮最多 `max_attempts_per_round` 次尝试
+- 最多 `max_rounds` 轮
 - AI 调用失败自动重试 3 次，带指数退避
-- 检测到风控签名时冷却 20-60 秒
+- 检测到风控签名时按 `cooldown_on_risk_min_sec` / `cooldown_on_risk_max_sec` 冷却
 - 验证码消失需连续检测确认
 
 ---
 
 ## 邮箱验证码
+
+当 `mfa.email_verification_enabled` 为 `false` 时，流程到 `/register/verification` 或 `verification-new-register` 会停止并返回 `AccountStatus.EMAIL_VERIFICATION_REQUIRED`。这种状态不写入失败账号文件，也不会从账号队列移除，适合只验收到邮箱验证码页的注册测试。
 
 ### IMAP 模式
 
@@ -533,6 +644,16 @@ time.sleep(random.uniform(0.01, 0.03))
 - 永久性错误（密码错误等）连续 3 次后停止
 - 从 subject 和 content 中提取验证码
 
+### Microsoft OAuth + IMAP 模式
+
+账号文件使用四段格式时启用 OAuth + IMAP：
+
+```text
+email@outlook.com----login_password----client_id----refresh_token
+```
+
+其中 `login_password` 用于 Binance 登录/注册，`client_id` 和 `refresh_token` 只用于邮箱 IMAP 认证。
+
 ---
 
 ## 本地缓存系统
@@ -547,7 +668,7 @@ time.sleep(random.uniform(0.01, 0.03))
 
 | 特性 | `cache.enabled: true` | `cache.enabled: false` |
 |------|----------------------|------------------------|
-| 浏览器启动 | `launch` + `new_context` | `launch` + `new_context` |
+| 浏览器启动 | subprocess + CDP 连接 | subprocess + CDP 连接 |
 | 请求拦截 | `page.route("**/*")` | 无 |
 | 静态资源缓存 | `route.fulfill()` 本地返回 | 无 |
 
@@ -600,7 +721,7 @@ IP 被风控，解决方案：
 
 ### 验证码识别失败
 
-- 检查 `debug/` 目录的截图确认 AI 识别结果
+- 查看控制台日志中的验证码类型、AI 返回 JSON 和坐标换算信息
 - 尝试更换 AI 模型
 - 增加 `max_attempts_per_round` 和 `max_rounds`
 

@@ -156,14 +156,9 @@ def dismiss_global_modal(page: Page, logger: Optional[Any] = None) -> bool:
     Returns:
         True 表示成功关闭，False 表示弹窗不存在或关闭失败
     """
-    try:
-        modal = page.query_selector("#globalmodal-common")
-        if not modal or not modal.is_visible():
-            return False
-    except Exception:
-        return False
-
     selectors = [
+        "#globalmodal-common button:has-text('I Understand')",
+        "#globalmodal-common button:has-text('Understand')",
         "#globalmodal-common button:has-text('已知晓')",
         "#globalmodal-common button:has-text('确定')",
         "#globalmodal-common button:has-text('关闭')",
@@ -173,6 +168,45 @@ def dismiss_global_modal(page: Page, logger: Optional[Any] = None) -> bool:
         "#globalmodal-common [aria-label='Close']",
         "#globalmodal-common .close",
     ]
+
+    try:
+        modal = page.query_selector("#globalmodal-common")
+        if modal and modal.is_visible():
+            for selector in selectors:
+                try:
+                    btn = page.query_selector(selector)
+                    if btn and btn.is_visible():
+                        btn.click(timeout=2500, force=True)
+                        page.wait_for_timeout(300)
+                        if logger:
+                            logger.info(f"关闭全局弹窗: {selector}")
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Region notice shown on some login pages, e.g. Hong Kong availability notice.
+    try:
+        body_text = page.inner_text("body")
+    except Exception:
+        body_text = ""
+    if "individuals in Hong Kong" in body_text or "not intended for individuals in Hong Kong" in body_text:
+        for selector in [
+            "button:has-text('I Understand')",
+            "button:has-text('Understand')",
+            "text=I Understand",
+        ]:
+            try:
+                btn = page.query_selector(selector)
+                if btn and btn.is_visible():
+                    btn.click(timeout=2500, force=True)
+                    page.wait_for_timeout(300)
+                    if logger:
+                        logger.info(f"关闭地区提示弹窗: {selector}")
+                    return True
+            except Exception:
+                pass
 
     for selector in selectors:
         try:
@@ -186,25 +220,7 @@ def dismiss_global_modal(page: Page, logger: Optional[Any] = None) -> bool:
         except Exception:
             pass
 
-    # Fallback: hide overlay using JavaScript
-    try:
-        page.evaluate(
-            """
-            () => {
-              const n = document.querySelector('#globalmodal-common');
-              if (!n) return false;
-              n.style.display = 'none';
-              n.style.pointerEvents = 'none';
-              return true;
-            }
-            """
-        )
-        page.wait_for_timeout(150)
-        if logger:
-            logger.info("通过注入样式隐藏全局弹窗")
-        return True
-    except Exception:
-        return False
+    return False
 
 
 def wait_for_url_change(

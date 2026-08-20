@@ -24,6 +24,7 @@ from .constants import (
     LOG_FORMAT,
     LOG_DATE_FORMAT,
 )
+from .results import AccountStatus
 from .utils import sanitize_filename
 
 
@@ -124,7 +125,10 @@ class LoggerManager:
             "failure": 0,
             "already_registered": 0,
             "rate_limited": 0,
+            "proxy_failed": 0,
+            "auth_failed": 0,
             "imap_auth_failed": 0,
+            "email_verification_required": 0,
             "need_register": 0,
         }
 
@@ -201,7 +205,7 @@ class LoggerManager:
     def record_result(
         self,
         email: str,
-        result,
+        result: AccountStatus,
         mode: str = "register",
         worker_id: int = 0,
         extra: str = "",
@@ -209,41 +213,47 @@ class LoggerManager:
         """
         记录单个账号的执行结果
 
-        result 取值说明：
-            True              → 成功
-            "already_registered" → 已注册，算成功
-            False             → 失败
-            "rate_limited"    → IP 被风控，算失败
-            "need_register"   → 账号不存在，算失败
-            "imap_auth_failed" → IMAP 认证失败，算失败
+        result 取值说明：使用 AccountStatus 枚举。
         """
         self._stats["total"] += 1
 
         # 判断结果类型
-        if result is True:
+        if result is AccountStatus.SUCCESS:
             success = True
             label = "✅ 成功"
             self._stats["success"] += 1
-        elif result == "already_registered":
+        elif result is AccountStatus.ALREADY_REGISTERED:
             success = True
             label = "✅ 已注册(成功)"
             self._stats["success"] += 1
             self._stats["already_registered"] += 1
-        elif result == "rate_limited":
+        elif result is AccountStatus.RATE_LIMITED:
             success = False
             label = "🚫 IP风控"
-            self._stats["failure"] += 1
             self._stats["rate_limited"] += 1
-        elif result == "need_register":
+        elif result is AccountStatus.PROXY_FAILED:
+            success = False
+            label = "代理失败"
+            self._stats["proxy_failed"] += 1
+        elif result is AccountStatus.AUTH_FAILED:
+            success = False
+            label = "认证失败"
+            self._stats["failure"] += 1
+            self._stats["auth_failed"] += 1
+        elif result is AccountStatus.NEED_REGISTER:
             success = False
             label = "⚠️  未注册"
             self._stats["failure"] += 1
             self._stats["need_register"] += 1
-        elif result == "imap_auth_failed":
+        elif result is AccountStatus.IMAP_AUTH_FAILED:
             success = False
             label = "📧 IMAP失败"
             self._stats["failure"] += 1
             self._stats["imap_auth_failed"] += 1
+        elif result is AccountStatus.EMAIL_VERIFICATION_REQUIRED:
+            success = False
+            label = "📧 待邮箱验证"
+            self._stats["email_verification_required"] += 1
         else:
             success = False
             label = "❌ 失败"
@@ -274,7 +284,10 @@ class LoggerManager:
             f"  ✅ 成功     : {stats['success']}  (含已注册 {stats['already_registered']})",
             f"  ❌ 失败     : {stats['failure']}",
             f"     - IP风控  : {stats['rate_limited']}",
+            f"     - 代理失败: {stats['proxy_failed']}",
+            f"     - 认证失败: {stats['auth_failed']}",
             f"     - IMAP失败: {stats['imap_auth_failed']}",
+            f"     - 待邮箱验证: {stats['email_verification_required']}",
             f"     - 未注册  : {stats['need_register']}",
             f"  成功率     : {rate}",
             f"  失败日志   → {self.failures_dir}/",
