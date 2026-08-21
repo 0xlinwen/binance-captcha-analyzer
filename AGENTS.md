@@ -10,6 +10,8 @@
 - 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `output/creator_api_debug/` 截图与文本并失败，不再从整页文本猜值。已清理 `output/registered_accounts.json` 中错误 API 字段。
 - 最近实测：2026-08-20 对 `tommimjr0@outlook.com` 执行真实登录时，在登录页滑块验证码阶段被弹窗拦截，流程返回 `AUTH_FAILED`，未进入 Creator Center，未生成 API 调试截图；账号已写入 `output/failed_accounts.txt`，需重新加入待处理队列后再测。
 - 最近修复：创作者中心进页后无点击、弹窗已有密钥仍失败。入口「查看 API >」无法 exact 匹配；新手引导层会挡住点击；密钥是「API 密钥」标签后的纯文本而不是 input。提取器改为包含匹配、先关引导、禁止 `networkidle` 空等，并按标签读取密钥。真实页面点击尚未复测。
+- 最近完成：提取 API 密钥后同时读取资料卡展示名称（`@Square-Creator-` 前方的 display_name，例如 `Alan Searchfield diwl`），写入 `registered_accounts.json` 的 `display_name`。找不到名称时密钥仍保存，display_name 留空。
+- 最近完成：抽完 API key 后点击「编辑」，从「编辑个人资料」读取「昵称」写入 `display_name`、「用户名」写入 `username`，然后点取消关闭，不改资料。
 
 ## 架构约定
 
@@ -26,7 +28,7 @@
 - `src/binance_analyzer/account_storage.py`：账号队列与成功/失败账号结果文件。
 - `src/binance_analyzer/proxy_ip_storage.py`：代理出口 IP 使用记录。
 - `src/binance_analyzer/registered_account_storage.py`：`registered_accounts.json` 持久化，完整保存账号凭据供后续复用。
-- `src/binance_analyzer/creator_api.py`：创作者中心 API 提取；`CreatorCenterApiExtractor` 负责关引导、点入口和按「API 密钥」标签读值。
+- `src/binance_analyzer/creator_api.py`：创作者中心提取；先读 API 密钥，再点「编辑」读取昵称（`display_name`）和用户名（`username`）。
 - `src/binance_analyzer/creator_api_quota.py`：单次运行 API 提取名额，失败释放、成功占用。
 - `src/binance_analyzer/screenshot_storage.py`：截图清理。
 - `src/proxy_forwarder/`：代理解析、质量检查、本地转发和运行时管理的可复用包；`proxy_utils.py` 放纯代理解析/格式化工具，业务代码通过 `proxy_integration.py` 适配。
@@ -64,7 +66,7 @@ python main.py --refresh-cache
 - 登录/注册核心页面动作必须显式成功：输入邮箱、输入密码、点击继续、勾选协议失败时立即返回失败，不做 JS 扫按钮、回车提交、点击页面中心等宽泛兜底。
 - 新增验证码类型时，直接扩展 `src/binance_analyzer/captcha/`：新增 `CaptchaType`、提示词模板、检测规则、对应 solver，并注册到 `build_default_solver_registry()`。验证码求解结果使用 `CaptchaSolveStatus`，由流程层映射到账号状态。
 - 主流程浏览器改为本机 Google Chrome（`get_local_chrome_path()`），不再使用 Playwright 自带 Chromium；找不到 Chrome 时 fail-fast，禁止静默回退。
-- 创作者中心 API 提取由 `creator_api.enabled` 开关控制，`creator_api.max_accounts` 限制单次运行前 N 个账号；结果写入 `registered_accounts.json` 的 `api_key` 与 `api_extracted_at` 字段，默认关闭。
+- 创作者中心 API 提取由 `creator_api.enabled` 开关控制，`creator_api.max_accounts` 限制单次运行前 N 个账号；结果写入 `registered_accounts.json` 的 `api_key`、`api_extracted_at` 与 `display_name` 字段，默认关闭。
 - `creator_api.max_accounts` 表示单次运行累计成功提取的 API 数，不限制登录/注册账号数量；并发任务通过输出目录配额状态文件协调，提取失败会释放名额供后续成功账号补位。
 
 ## 踩坑记录
@@ -108,3 +110,11 @@ python main.py --refresh-cache
 - 现象：打开创作者中心后页面停住，看不到点击，随后直接失败；有时弹窗已经显示密钥仍报未找到。
   原因：入口文案是「查看 API >」，exact 匹配失败；`a,button` 全量扫描很慢且点不到普通 div；新手引导层拦截指针；广场页 `networkidle` 会空等满超时；密钥在「API 密钥」下方的文本节点，不在 input 里。
   解决方案：按包含文案点入口，先点「跳过」关掉引导，不等 networkidle，只从「API 密钥 / API Key」标签后读取 16–64 位密钥，继续排除 `Square-Creator-*` 用户名。
+
+- 现象：资料卡展示名称（如 `Alan Searchfield diwl`）没有写入 `display_name`。
+  原因：提取只读 API 密钥，且 `display_name` 不在登录托管字段里，二次保存不会更新。
+  解决方案：在同一创作者中心页读取 `@Square-Creator-` 前方文本作为 `display_name`，排除句柄和按钮文案；`LOGIN_MANAGED_FIELDS` 加入该字段。
+
+- 现象：`display_name` 落成 `User-f6c2f7fa` 这类值，和页面上看到的昵称不一致。
+  原因：旧逻辑解析整页 `inner_text`/句柄相邻字段，拿到的是默认用户名或接口数据，不是资料卡上画出来的大字昵称。
+  解决方案：用页面可见文本节点（排除弹窗、隐藏节点）按字号和位置选取 `@Square-Creator-` 左侧标题；不行再打开「编辑」读「昵称」输入框。

@@ -123,6 +123,65 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(data["accounts"][0]["cookie"], "newcookie")
             self.assertEqual(data["accounts"][0]["display_name"], "keep-me")
 
+    def test_save_registered_account_updates_display_name_when_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            save_registered_account(
+                base_dir,
+                "output/registered_accounts.json",
+                {
+                    "email": "alice@example.com----pass1",
+                    "password": "pass1",
+                    "cookie": "cookie",
+                    "csrftoken": "token",
+                    "display_name": "",
+                },
+            )
+            save_registered_account(
+                base_dir,
+                "output/registered_accounts.json",
+                {
+                    "email": "alice@example.com----pass1",
+                    "api_key": "abcdEFGH1234567890key",
+                    "display_name": "Alan Searchfield diwl",
+                },
+            )
+
+            data = __import__("json").loads(
+                (base_dir / "output" / "registered_accounts.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(data["accounts"][0]["display_name"], "Alan Searchfield diwl")
+            self.assertEqual(data["accounts"][0]["api_key"], "abcdEFGH1234567890key")
+
+    def test_save_registered_account_updates_username_when_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            save_registered_account(
+                base_dir,
+                "output/registered_accounts.json",
+                {
+                    "email": "alice@example.com----pass1",
+                    "password": "pass1",
+                    "cookie": "cookie",
+                    "csrftoken": "token",
+                },
+            )
+            save_registered_account(
+                base_dir,
+                "output/registered_accounts.json",
+                {
+                    "email": "alice@example.com----pass1",
+                    "username": "Square-Creator-8f524cbdf4d47",
+                    "display_name": "Alan Searchfield diwl",
+                },
+            )
+
+            data = __import__("json").loads(
+                (base_dir / "output" / "registered_accounts.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(data["accounts"][0]["username"], "Square-Creator-8f524cbdf4d47")
+            self.assertEqual(data["accounts"][0]["display_name"], "Alan Searchfield diwl")
+
     def test_save_registered_account_preserves_email_password_output_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)

@@ -12,8 +12,12 @@ from binance_analyzer.creator_api import (
     _text_pattern,
     extract_api_key_from_text,
     extract_creator_api,
+    extract_display_name_from_text,
     is_api_entry_label,
+    is_default_user_code,
+    pick_visible_display_name,
     valid_api_key,
+    valid_display_name,
 )
 
 CAPTURED_CREATOR_HOME = """
@@ -50,13 +54,22 @@ API 密钥创建成功
 
 
 class _FakeElement:
-    def __init__(self, text: str, *, role: str = "button", visible: bool = True, value: str = "") -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        role: str = "button",
+        visible: bool = True,
+        value: str = "",
+        on_click=None,
+    ) -> None:
         self.text = text
         self.role = role
         self.visible = visible
         self.value = value
         self.clicked = False
         self.force_clicked = False
+        self.on_click = on_click
 
     def count(self) -> int:
         return 1
@@ -77,6 +90,8 @@ class _FakeElement:
         self.clicked = True
         if kwargs.get("force"):
             self.force_clicked = True
+        if self.on_click:
+            self.on_click()
 
     def inner_text(self, timeout: int | None = None) -> str:
         return self.text
@@ -89,7 +104,9 @@ class _FakeElement:
             return self.value
         return ""
 
-    def locator(self, _selector: str) -> "_FakeLocator":
+    def locator(self, selector: str) -> "_FakeLocator":
+        if "input" in selector and self.value:
+            return _FakeLocator([_FakeElement("", value=self.value)])
         return _FakeLocator([])
 
     def wait_for(self, **_kwargs) -> None:
@@ -144,12 +161,26 @@ class _FakeContext:
 
 
 class _FakePage:
-    def __init__(self, body_text: str, controls: list[_FakeElement] | None = None) -> None:
+    def __init__(
+        self,
+        body_text: str,
+        controls: list[_FakeElement] | None = None,
+        visible_candidates: list[dict] | None = None,
+        nickname: str = "",
+        username: str = "",
+    ) -> None:
         self.body_text = body_text
         self.controls = controls or []
+        self.visible_candidates = visible_candidates or []
+        self.nickname = nickname
+        self.username = username
+        self.edit_open = False
         self.url = CREATOR_CENTER_URL
         self.context = _FakeContext(self)
         self.gotos: list[str] = []
+
+    def evaluate(self, _script: str) -> list[dict]:
+        return self.visible_candidates
 
     def goto(self, url: str, **_kwargs) -> None:
         self.gotos.append(url)
@@ -190,6 +221,14 @@ class _FakePage:
         return _FakeLocator(matched)
 
     def get_by_text(self, text: str | re.Pattern[str], exact: bool = False) -> _FakeLocator:
+        if self.edit_open:
+            raw = text.pattern if hasattr(text, "pattern") else str(text)
+            if "编辑个人资料" in raw or "Edit Profile" in raw:
+                return _FakeLocator([_FakeElement("编辑个人资料")])
+            if "昵称" in raw or "Nickname" in raw:
+                return _FakeLocator([_FakeElement("昵称", value=self.nickname)])
+            if "用户名" in raw or "Username" in raw:
+                return _FakeLocator([_FakeElement("用户名", value=self.username)])
         matched = [item for item in self.controls if _text_matches(item.text, text, exact=exact)]
         if not matched and _text_matches(self.body_text, text, exact=exact):
             matched.append(_FakeElement(self.body_text, role="document"))
@@ -222,6 +261,82 @@ class ExtractApiKeyFromTextTests(unittest.TestCase):
 
     def test_ignores_success_toast_without_key_value(self) -> None:
         self.assertEqual(extract_api_key_from_text("API 密钥创建成功"), "")
+
+
+class PickVisibleDisplayNameTests(unittest.TestCase):
+    def test_finds_handle_without_at_symbol_in_same_node(self) -> None:
+        value = pick_visible_display_name(
+            [
+                {"text": "User-f6c2f7fa", "fontSize": 20, "fontWeight": 600, "x": 90, "y": 100},
+                {"text": "Square-Creator-f6c2f7fa22c69", "fontSize": 12, "fontWeight": 400, "x": 360, "y": 104},
+            ]
+        )
+        self.assertEqual(value, "User-f6c2f7fa")
+
+    def test_picks_larger_visible_name_left_of_handle(self) -> None:
+        value = pick_visible_display_name(
+            [
+                {"text": "Alan Searchfield diwl", "fontSize": 20, "fontWeight": 600, "x": 90, "y": 100},
+                {"text": "User-f6c2f7fa", "fontSize": 12, "fontWeight": 400, "x": 90, "y": 100},
+                {"text": "@Square-Creator-8f524cbdf4d47", "fontSize": 12, "fontWeight": 400, "x": 360, "y": 104},
+                {"text": "立即认证", "fontSize": 12, "fontWeight": 400, "x": 560, "y": 100},
+                {"text": "编辑", "fontSize": 12, "fontWeight": 400, "x": 700, "y": 100},
+                {"text": "查看 API", "fontSize": 12, "fontWeight": 400, "x": 760, "y": 100},
+            ]
+        )
+        self.assertEqual(value, "Alan Searchfield diwl")
+
+    def test_uses_default_user_code_when_it_is_the_visible_title(self) -> None:
+        value = pick_visible_display_name(
+            [
+                {"text": "User-198e6dbe", "fontSize": 20, "fontWeight": 600, "x": 90, "y": 100},
+                {"text": "@Square-Creator-198e6dbeb8662", "fontSize": 12, "fontWeight": 400, "x": 360, "y": 104},
+            ]
+        )
+        self.assertEqual(value, "User-198e6dbe")
+
+    def test_picks_name_when_it_sits_above_the_handle(self) -> None:
+        value = pick_visible_display_name(
+            [
+                {"text": "Alan Searchfield diwl", "fontSize": 20, "fontWeight": 600, "x": 90, "y": 80},
+                {"text": "User-025750be", "fontSize": 12, "fontWeight": 400, "x": 90, "y": 130},
+                {"text": "@Square-Creator-8f524cbdf4d47", "fontSize": 12, "fontWeight": 400, "x": 360, "y": 130},
+            ]
+        )
+        self.assertEqual(value, "Alan Searchfield diwl")
+
+
+class ExtractDisplayNameFromTextTests(unittest.TestCase):
+    def test_reads_name_on_line_before_handle(self) -> None:
+        self.assertEqual(extract_display_name_from_text(CAPTURED_CREATOR_HOME), "Efrain Recendez mUgO")
+
+    def test_reads_name_on_same_line_as_handle(self) -> None:
+        text = "Alan Searchfield diwl @Square-Creator-8f524cbdf4d47\n立即认证\n编辑\n查看 API"
+        self.assertEqual(extract_display_name_from_text(text), "Alan Searchfield diwl")
+
+    def test_skips_default_user_code_and_reads_visible_nickname(self) -> None:
+        text = """
+创作内容
+Alan Searchfield diwl
+User-f6c2f7fa
+@Square-Creator-8f524cbdf4d47
+立即认证
+编辑
+查看 API
+"""
+        self.assertEqual(extract_display_name_from_text(text), "Alan Searchfield diwl")
+
+    def test_does_not_use_default_user_code_as_name(self) -> None:
+        text = "创作内容\nUser-f6c2f7fa\n@Square-Creator-8f524cbdf4d47\n立即认证"
+        self.assertEqual(extract_display_name_from_text(text), "")
+        self.assertTrue(is_default_user_code("User-f6c2f7fa"))
+        self.assertFalse(valid_display_name("User-f6c2f7fa"))
+
+    def test_does_not_use_handle_or_buttons_as_name(self) -> None:
+        self.assertEqual(extract_display_name_from_text("@Square-Creator-8f524cbdf4d47\n立即认证"), "")
+        self.assertFalse(valid_display_name("Square-Creator-8f524cbdf4d47"))
+        self.assertFalse(valid_display_name("立即认证"))
+        self.assertFalse(valid_display_name("0"))
 
 
 class ValidApiKeyTests(unittest.TestCase):
@@ -263,22 +378,27 @@ class ReadApiValueTests(unittest.TestCase):
 
 
 class ExtractCreatorApiTests(unittest.TestCase):
-    def test_extracts_visible_key_without_requiring_entry_click(self) -> None:
+    def test_extracts_key_then_reads_edit_profile_fields(self) -> None:
         page = _FakePage(
             CAPTURED_CREATOR_HOME,
             controls=[
                 _FakeElement("跳过"),
                 _FakeElement("查看 API >"),
+                _FakeElement("好的"),
                 _FakeElement("创作内容"),
             ],
+            nickname="Alan Searchfield diwl",
+            username="Square-Creator-8f524cbdf4d47",
         )
+        edit_button = _FakeElement("编辑", on_click=lambda: setattr(page, "edit_open", True))
+        page.controls.append(edit_button)
 
-        value = extract_creator_api(page, {})
+        profile = extract_creator_api(page, {})
 
-        self.assertEqual(value, "ec7d6cea1b1642fa9636ab4035ba8834")
-        self.assertEqual(page.gotos, [CREATOR_CENTER_URL])
-        self.assertTrue(page.controls[0].clicked)
-        self.assertFalse(page.controls[1].clicked)
+        self.assertEqual(profile.api_key, "ec7d6cea1b1642fa9636ab4035ba8834")
+        self.assertEqual(profile.display_name, "Alan Searchfield diwl")
+        self.assertEqual(profile.username, "Square-Creator-8f524cbdf4d47")
+        self.assertTrue(edit_button.clicked)
 
     def test_clicks_view_api_when_key_is_not_visible_yet(self) -> None:
         view_api = _FakeElement("查看 API >")
@@ -290,9 +410,11 @@ class ExtractCreatorApiTests(unittest.TestCase):
             return ""
 
         with patch("binance_analyzer.creator_api._read_api_value", side_effect=fake_read):
-            value = CreatorCenterApiExtractor(page).extract()
+            profile = CreatorCenterApiExtractor(page).extract()
 
-        self.assertEqual(value, "ec7d6cea1b1642fa9636ab4035ba8834")
+        self.assertEqual(profile.api_key, "ec7d6cea1b1642fa9636ab4035ba8834")
+        self.assertEqual(profile.display_name, "")
+        self.assertEqual(profile.username, "")
         self.assertTrue(view_api.clicked)
 
 
