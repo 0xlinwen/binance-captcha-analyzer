@@ -9,7 +9,19 @@ from datetime import datetime
 from pathlib import Path
 
 
-LOGIN_MANAGED_FIELDS = {"cookie", "csrftoken", "enabled", "name", "mail_api_url", "email", "password", "api_key", "api_extracted_at"}
+LOGIN_MANAGED_FIELDS = {
+    "cookie",
+    "csrftoken",
+    "enabled",
+    "name",
+    "mail_api_url",
+    "email",
+    "password",
+    "api_key",
+    "api_extracted_at",
+    "display_name",
+    "username",
+}
 
 
 def registered_account_identity(account: dict) -> str:

@@ -412,6 +412,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "avatar_changed":   False,
                     "nickname_changed": False,
                     "display_name":     "",
+                    "username":         "",
                     "mail_api_url":     "https://wrpifa-com.netlify.app/",
                 }
                 save_registered_account(base_dir, output_file, account_data)
@@ -424,8 +425,8 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     else:
                         print(f"\n[Worker-{worker_id}] 提取创作者中心 API...")
                         try:
-                            creator_api_key = extract_creator_api(page, config, page_timeout=PAGE_TIMEOUT)
-                            account_data.update(api_metadata(creator_api_key))
+                            creator_profile = extract_creator_api(page, config, page_timeout=PAGE_TIMEOUT)
+                            account_data.update(api_metadata(creator_profile))
                             save_registered_account(base_dir, output_file, account_data)
                         except Exception as exc:
                             release_creator_api_slot(base_dir, config, slot_token, completed=False)
