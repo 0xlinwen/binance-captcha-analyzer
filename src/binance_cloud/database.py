@@ -124,6 +124,12 @@ class Database:
                 self.conn.execute("INSERT INTO login_job_proxy_usage(job_id,proxy_address,assigned_count,last_assigned_at) VALUES(?,?,?,?)", (job_id, address, min(len(accounts), limit), now))
         return self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
 
+    def create_relogin_job(self, account_id: int, proxy: dict | None = None) -> dict:
+        account = self._one("SELECT email,password,client_id,refresh_token FROM accounts WHERE id=?", (account_id,))
+        if not account:
+            raise ValueError("账号不存在")
+        return self.create_job([account], proxy)
+
     def get_job(self, job_id: str):
         job = self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
         if job:
@@ -241,6 +247,8 @@ class Database:
                 return item
             if status not in {"success", "failed", "retryable", "proxy_failed", "rate_limited"}:
                 raise ValueError(f"不支持的回调状态: {status}")
+            if status == "success" and not payload.get("cookie"):
+                raise ValueError("成功回调必须包含 cookie")
             now = utc_now()
             stored_status = "failed" if status in {"proxy_failed", "rate_limited"} else status
             self.conn.execute("UPDATE login_job_items SET status=?, error_code=?, error_message=?, completed_at=?, lease_expires_at=NULL WHERE id=?",

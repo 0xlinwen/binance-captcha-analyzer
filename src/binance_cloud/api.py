@@ -165,6 +165,21 @@ def check_cookie(account_id: int):
     return _check_cookie(value)
 
 
+@app.post("/api/accounts/{account_id}/relogin")
+def relogin(account_id: int, proxy: ProxyIn = ProxyIn()):
+    try:
+        job = db.create_relogin_job(account_id, proxy.model_dump())
+        db.mark_job_running(job["id"])
+        if WINDOWS_WORKER_URL:
+            payload = db.worker_payload(job["id"])
+            payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
+            db.mark_items_running(job["id"], "dispatching", LEASE_SECONDS)
+            threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
+        return {"job_id": job["id"], "status": "submitted"}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _check_cookie(value: dict):
     try:
         expires = value.get("cookie_expires_at")
