@@ -7,8 +7,7 @@ from dataclasses import dataclass
 import requests
 
 
-CREATOR_CENTER_URL = "https://www.binance.com/zh-CN/square/creator-center/home"
-CREATOR_MARKERS = ("创作者", "Creator", "查看 API", "创建 API 密钥", "创作内容")
+AUTH_CHECK_URL = "https://www.binance.com/bapi/accounts/v1/public/authcenter/auth"
 
 
 @dataclass(frozen=True)
@@ -18,17 +17,21 @@ class CookieCheckResult:
     reason: str = ""
 
 
-def classify_creator_response(url: str, body_text: str, status_code: int) -> CookieCheckResult:
-    normalized_url = str(url or "").lower()
-    text = str(body_text or "")
-    if status_code in {401, 403} or "/login" in normalized_url:
+def classify_auth_response(url: str, body_text: str, status_code: int) -> CookieCheckResult:
+    if status_code in {401, 403}:
         return CookieCheckResult("expired", url, f"登录态失效 HTTP {status_code}")
-    if "creator-center" in normalized_url and any(marker.lower() in text.lower() for marker in CREATOR_MARKERS):
-        return CookieCheckResult("valid", url, "Creator Center 可访问")
+    try:
+        payload = __import__("json").loads(body_text)
+    except (TypeError, ValueError):
+        return CookieCheckResult("unknown", url, f"响应不是 JSON HTTP {status_code}")
+    if status_code == 200 and payload.get("success") is True and str(payload.get("code")) == "000000":
+        return CookieCheckResult("valid", url, "Binance authcenter/auth 返回成功")
+    if status_code == 200 and ("code" in payload or "success" in payload):
+        return CookieCheckResult("expired", url, f"登录态接口返回失败 code={payload.get('code')}")
     return CookieCheckResult("unknown", url, f"响应未呈现明确状态 HTTP {status_code}")
 
 
-def check_creator_center_cookie(cookie: str, *, timeout: int = 20, url: str = CREATOR_CENTER_URL) -> CookieCheckResult:
+def check_creator_center_cookie(cookie: str, *, timeout: int = 20, url: str = AUTH_CHECK_URL) -> CookieCheckResult:
     if not isinstance(cookie, str) or not cookie.strip():
         raise ValueError("Cookie 不能为空")
     session = requests.Session()
@@ -37,11 +40,12 @@ def check_creator_center_cookie(cookie: str, *, timeout: int = 20, url: str = CR
     try:
         response = session.post(
             url,
-            headers={"Cookie": cookie, "User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml"},
+            json={},
+            headers={"Cookie": cookie, "User-Agent": "Mozilla/5.0", "Accept": "application/json"},
             timeout=timeout,
             allow_redirects=True,
         )
-        return classify_creator_response(response.url, response.text, response.status_code)
+        return classify_auth_response(response.url, response.text, response.status_code)
     except requests.RequestException as exc:
         return CookieCheckResult("unknown", url, f"请求失败: {exc}")
     finally:

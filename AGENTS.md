@@ -17,7 +17,7 @@
 - 最近完成：云端服务保留可选 Worker/回调 Token 校验（默认未配置时放行），并增加 Worker 注册与执行心跳、任务租约超时回收、Cookie 在线检查接口、固定代理任务计数和回调重试；新增 2 项 SQLite 服务测试。
 - 最近完成：继续增加云端维护循环（过期租约回收、Worker offline、retryable 自动重派）、Cookie 周期检查、任务取消/数据库备份/日志清理接口、SQLite WAL 和部署模板；Worker 任务已传递 `client_id`/`refresh_token`，Cookie 过期时间统一为 UTC ISO 字符串。
 - 最近完成：成功回调缺少 Cookie 时拒绝；新增 `/api/accounts/{id}/relogin` 重新登录入口；全量测试仍为 151 项通过。
-- 最近完成：新增独立 `src/binance_cloud/cookie_checker.py`，Linux 后台只向 Creator Center 发起带 Cookie 的 HTTP POST 并返回 `valid/expired/unknown`，不启动浏览器、不调用 Creator API 信息提取；全量测试更新后需重新验证。
+- 最近完成：通过本机 Chrome 抓到 Creator Center 使用的真实登录态接口 `POST /bapi/accounts/v1/public/authcenter/auth`；`cookie_checker.py` 现直接携带 Cookie 调用该接口，不启动浏览器、不调用 Creator API 信息提取；全量测试更新后需重新验证。
 
 ## 架构约定
 
