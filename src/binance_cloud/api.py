@@ -13,6 +13,7 @@ from fastapi import Header
 from pydantic import BaseModel, Field
 
 from .database import Database
+from .cookie_checker import check_creator_center_cookie
 
 
 DB_PATH = os.getenv("BINANCE_CLOUD_DB", "data/binance.db")
@@ -185,14 +186,11 @@ def _check_cookie(value: dict):
         expires = value.get("cookie_expires_at")
         if expires and expires < datetime.now(timezone.utc).isoformat():
             return db.update_credential_check(value["account_id"], "expired", "cookie_expires_at 已过期")
-        response = requests.get(COOKIE_CHECK_URL, headers={"Cookie": value["cookie"]}, timeout=20, allow_redirects=False)
-        if response.status_code in {401, 403} or "login" in response.headers.get("location", "").lower():
-            status, error = "expired", f"HTTP {response.status_code}"
-        elif response.ok:
-            status, error = "valid", ""
-        else:
-            status, error = "unknown", f"HTTP {response.status_code}"
+        result = check_creator_center_cookie(value["cookie"], page_timeout=20000)
+        status, error = result.status, result.reason
     except requests.RequestException as exc:
+        status, error = "unknown", str(exc)
+    except Exception as exc:
         status, error = "unknown", str(exc)
     return db.update_credential_check(value["account_id"], status, error)
 
