@@ -13,17 +13,13 @@ from fastapi import Header
 from pydantic import BaseModel, Field
 
 from .database import Database
-from .cookie_checker import check_creator_center_cookie
 
 
 DB_PATH = os.getenv("BINANCE_CLOUD_DB", "data/binance.db")
 WINDOWS_WORKER_URL = os.getenv("BINANCE_WINDOWS_WORKER_URL", "")
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", "")
-COOKIE_CHECK_URL = os.getenv("BINANCE_COOKIE_CHECK_URL", "https://www.binance.com/zh-CN/my/dashboard")
 LEASE_SECONDS = int(os.getenv("BINANCE_TASK_LEASE_SECONDS", "1800"))
-COOKIE_CHECK_INTERVAL = int(os.getenv("BINANCE_COOKIE_CHECK_INTERVAL", "900"))
-COOKIE_CHECK_PROXY = os.getenv("BINANCE_COOKIE_CHECK_PROXY", "").strip() or None
 db = Database(DB_PATH)
 app = FastAPI(title="Binance Login Cloud API")
 
@@ -86,7 +82,6 @@ def _dispatch_worker(payload: dict) -> None:
 
 
 def _maintenance_loop() -> None:
-    last_cookie_check = 0.0
     while True:
         try:
             db.recover_expired_items()
@@ -98,10 +93,6 @@ def _maintenance_loop() -> None:
                     payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
                     db.mark_items_running(job_id, "dispatching", LEASE_SECONDS)
                     threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
-            if time.monotonic() - last_cookie_check >= COOKIE_CHECK_INTERVAL:
-                for credential_row in db.credentials_for_check():
-                    _check_cookie(credential_row)
-                last_cookie_check = time.monotonic()
         except Exception as exc:
             db.record_log("maintenance_failed", str(exc), level="ERROR")
         time.sleep(60)
@@ -159,14 +150,6 @@ def credential(account_id: int):
     return value
 
 
-@app.post("/api/accounts/{account_id}/check-cookie")
-def check_cookie(account_id: int):
-    value = db.credential(account_id)
-    if not value:
-        raise HTTPException(404, "凭证不存在")
-    return _check_cookie(value)
-
-
 @app.post("/api/accounts/{account_id}/relogin")
 def relogin(account_id: int, proxy: ProxyIn = ProxyIn()):
     try:
@@ -180,20 +163,6 @@ def relogin(account_id: int, proxy: ProxyIn = ProxyIn()):
         return {"job_id": job["id"], "status": "submitted"}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-
-
-def _check_cookie(value: dict):
-    try:
-        expires = value.get("cookie_expires_at")
-        if expires and expires < datetime.now(timezone.utc).isoformat():
-            return db.update_credential_check(value["account_id"], "expired", "cookie_expires_at 已过期")
-        result = check_creator_center_cookie(value["cookie"], timeout=20, proxy=COOKIE_CHECK_PROXY)
-        status, error = result.status, result.reason
-    except requests.RequestException as exc:
-        status, error = "unknown", str(exc)
-    except Exception as exc:
-        status, error = "unknown", str(exc)
-    return db.update_credential_check(value["account_id"], status, error)
 
 
 @app.post("/api/workers/{worker_id}/heartbeat")
