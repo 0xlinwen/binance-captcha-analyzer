@@ -85,12 +85,14 @@ def execute(payload: dict) -> None:
             password = f"{password}----{account['client_id']}----{account['refresh_token']}"
         heartbeat_stop = threading.Event()
         try:
-            state_response = requests.get(callback_base + f"/api/login-jobs/{job_id}/status", headers=callback_headers, timeout=20)
-            state_response.raise_for_status()
-            if state_response.json()["status"] == "cancelled":
-                break
+            debug_mode = bool(task_config.get("debug_mode", False))
+            if not debug_mode:
+                state_response = requests.get(callback_base + f"/api/login-jobs/{job_id}/status", headers=callback_headers, timeout=20)
+                state_response.raise_for_status()
+                if state_response.json()["status"] == "cancelled":
+                    break
             heartbeat_thread = None
-            if callback_base:
+            if callback_base and not debug_mode:
                 heartbeat_url = callback_base + f"/api/workers/{WORKER_ID}/heartbeat"
                 requests.post(heartbeat_url, json={"current_job_item_id": account["job_item_id"]}, headers=headers, timeout=20).raise_for_status()
                 def heartbeat_loop():

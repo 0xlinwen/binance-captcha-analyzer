@@ -126,7 +126,9 @@ python -m pip install -r requirements-server.txt
 Linux 云端启动 API：
 
 ```bash
-PYTHONPATH=src BINANCE_CLOUD_DB=data/binance.db BINANCE_WINDOWS_WORKER_URL=https://windows.example.com \
+PYTHONPATH=src BINANCE_CLOUD_DB=data/binance.db \
+BINANCE_WINDOWS_WORKER_URL=https://windows.example.com \
+BINANCE_CALLBACK_URL=https://linux.example.com/api/worker/callback \
   uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
 ```
 
@@ -142,6 +144,11 @@ $env:BINANCE_WORKER_BASE_DIR = "C:\\binance-worker"
 $env:BINANCE_CALLBACK_URL = "https://linux.example.com/api/worker/callback"
 python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
 ```
+
+本地直接调试 Worker、暂时没有 Linux 任务状态接口时，可在 Windows 的
+`config.json` 中设置 `"debug_mode": true`。调试模式会跳过任务状态查询和心跳，
+但仍会执行登录/注册；如果配置了 `BINANCE_CALLBACK_URL`，执行结果仍会回调。
+生产环境请保持 `debug_mode` 为 `false`，以启用取消检查和租约心跳。
 
 Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
 `playwright install chromium`；`BINANCE_WORKER_BASE_DIR` 必须指向包含
