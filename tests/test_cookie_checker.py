@@ -31,3 +31,6 @@ class CookieCheckerTests(unittest.TestCase):
         result = check_creator_center_cookie("a=b", proxy="http://127.0.0.1:7890")
         self.assertEqual(result.status, "valid")
         session.proxies.update.assert_called_once_with({"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"})
+        headers = session.post.call_args.kwargs["headers"]
+        self.assertEqual(headers["clienttype"], "web")
+        self.assertIn("creator-center/home", headers["Referer"])

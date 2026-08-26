@@ -42,7 +42,14 @@ def check_creator_center_cookie(cookie: str, *, timeout: int = 20, url: str = AU
         response = session.post(
             url,
             json={},
-            headers={"Cookie": cookie, "User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            headers={
+                "Cookie": cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Referer": "https://www.binance.com/zh-CN/square/creator-center/home",
+                "clienttype": "web",
+            },
             timeout=timeout,
             allow_redirects=True,
         )
