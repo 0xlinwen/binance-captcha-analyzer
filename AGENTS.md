@@ -14,6 +14,7 @@
 - 最近完成：提取 API 密钥后同时读取资料卡展示名称（`@Square-Creator-` 前方的 display_name，例如 `Alan Searchfield diwl`），写入 `registered_accounts.json` 的 `display_name`。找不到名称时密钥仍保存，display_name 留空。
 - 最近完成：抽完 API key 后点击「编辑」，从「编辑个人资料」读取「昵称」写入 `display_name`、「用户名」写入 `username`，然后点取消关闭，不改资料。
 - 最近完成：新增 `src/binance_cloud/` 实验性 SQLite 云端 API 与 Windows Worker 入口；Linux 创建登录任务并异步 POST 给 Windows，Windows 复用 `register_account`，每个账号完成后回调 Linux；Cookie 额外记录 `cookie_expires_at`，SQLite 长字段使用 `TEXT`。
+- 最近完成：云端服务增加 Worker/回调 Token 鉴权、Worker 注册与执行心跳、任务租约超时回收、Cookie 在线检查接口、固定代理任务计数和回调重试；新增 2 项 SQLite 服务测试。
 
 ## 架构约定
 
@@ -34,7 +35,7 @@
 - `src/binance_analyzer/creator_api_quota.py`：单次运行 API 提取名额，失败释放、成功占用。
 - `src/binance_analyzer/screenshot_storage.py`：截图清理。
 - `src/proxy_forwarder/`：代理解析、质量检查、本地转发和运行时管理的可复用包；`proxy_utils.py` 放纯代理解析/格式化工具，业务代码通过 `proxy_integration.py` 适配。
-- `src/binance_cloud/`：SQLite 数据库、Linux FastAPI 接口和 Windows 执行服务；服务入口目前为实验性 MVP，尚未完成生产鉴权、心跳重试和实际部署验收。
+- `src/binance_cloud/`：SQLite 数据库、Linux FastAPI 接口和 Windows 执行服务；服务入口目前为实验性 MVP，生产 HTTPS、系统服务部署和真实 Binance Cookie 检查仍待验收。
 
 ## 常用命令
 

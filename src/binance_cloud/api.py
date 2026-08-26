@@ -7,6 +7,7 @@ import threading
 import requests
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
+from fastapi import Header
 from pydantic import BaseModel, Field
 
 from .database import Database
@@ -14,8 +15,17 @@ from .database import Database
 
 DB_PATH = os.getenv("BINANCE_CLOUD_DB", "data/binance.db")
 WINDOWS_WORKER_URL = os.getenv("BINANCE_WINDOWS_WORKER_URL", "")
+WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
+CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", "")
+COOKIE_CHECK_URL = os.getenv("BINANCE_COOKIE_CHECK_URL", "https://www.binance.com/zh-CN/my/dashboard")
+LEASE_SECONDS = int(os.getenv("BINANCE_TASK_LEASE_SECONDS", "1800"))
 db = Database(DB_PATH)
 app = FastAPI(title="Binance Login Cloud API")
+
+
+def _auth(value: str | None, expected: str, label: str) -> None:
+    if expected and value != expected:
+        raise HTTPException(401, f"{label} token 无效")
 
 
 class AccountIn(BaseModel):
@@ -54,6 +64,7 @@ def create_job(request: JobIn):
         if WINDOWS_WORKER_URL:
             payload = db.worker_payload(job["id"])
             payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
+            db.mark_items_running(job["id"], "dispatching", LEASE_SECONDS)
             threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
         return {"job_id": job["id"], "status": "submitted", "total_count": job["total_count"], "worker_url": WINDOWS_WORKER_URL}
     except ValueError as exc:
@@ -62,7 +73,8 @@ def create_job(request: JobIn):
 
 def _dispatch_worker(payload: dict) -> None:
     try:
-        response = requests.post(f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/execute-login", json=payload, timeout=30)
+        headers = {"X-Worker-Token": WORKER_TOKEN} if WORKER_TOKEN else {}
+        response = requests.post(f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/execute-login", json=payload, headers=headers, timeout=30)
         response.raise_for_status()
     except Exception as exc:
         db.record_log("worker_dispatch_failed", str(exc), job_id=payload.get("job_id"), level="ERROR")
@@ -77,7 +89,8 @@ def get_job(job_id: str):
 
 
 @app.post("/api/worker/callback")
-def callback(payload: dict):
+def callback(payload: dict, x_worker_token: str | None = Header(default=None)):
+    _auth(x_worker_token, CALLBACK_TOKEN or WORKER_TOKEN, "Worker")
     try:
         return db.save_callback(payload)
     except (KeyError, ValueError) as exc:
@@ -90,6 +103,43 @@ def credential(account_id: int):
     if not value:
         raise HTTPException(404, "凭证不存在")
     return value
+
+
+@app.post("/api/accounts/{account_id}/check-cookie")
+def check_cookie(account_id: int):
+    value = db.credential(account_id)
+    if not value:
+        raise HTTPException(404, "凭证不存在")
+    try:
+        response = requests.get(COOKIE_CHECK_URL, headers={"Cookie": value["cookie"]}, timeout=20, allow_redirects=False)
+        if response.status_code in {401, 403} or "login" in response.headers.get("location", "").lower():
+            status, error = "expired", f"HTTP {response.status_code}"
+        elif response.ok:
+            status, error = "valid", ""
+        else:
+            status, error = "unknown", f"HTTP {response.status_code}"
+    except requests.RequestException as exc:
+        status, error = "unknown", str(exc)
+    return db.update_credential_check(account_id, status, error)
+
+
+@app.post("/api/workers/{worker_id}/heartbeat")
+def worker_heartbeat(worker_id: str, payload: dict | None = None, x_worker_token: str | None = Header(default=None)):
+    _auth(x_worker_token, WORKER_TOKEN, "Worker")
+    payload = payload or {}
+    return db.heartbeat(worker_id, payload.get("current_job_item_id"))
+
+
+@app.post("/api/workers/{worker_id}/register")
+def worker_register(worker_id: str, payload: dict | None = None, x_worker_token: str | None = Header(default=None)):
+    _auth(x_worker_token, WORKER_TOKEN, "Worker")
+    payload = payload or {}
+    return db.register_worker(worker_id, payload.get("name", ""), payload.get("version", ""))
+
+
+@app.get("/api/workers")
+def workers():
+    return db.workers()
 
 
 @app.get("/api/login-jobs/{job_id}/logs")
