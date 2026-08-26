@@ -61,6 +61,8 @@ src/binance_analyzer/
   cli.py                               # 主入口、并发调度、信号处理、缓存预热
   config.py                            # 配置加载与默认值
   orchestrator.py                      # 单账号编排（代理、浏览器、流程、Cookie）
+  automation_driver.py                 # 登录/注册驱动抽象与统一结果封装
+  credential_export.py                 # Cookie、CSRF、过期时间导出
   browser_context.py                   # 浏览器上下文、反检测脚本、subprocess 启动
   flows.py                             # 登录/注册共享状态机工具
   login_flow.py                        # 登录流程状态机
@@ -93,6 +95,12 @@ src/proxy_forwarder/
   proxy_utils.py                       # 代理文本解析、URL 构建、客户端配置
   runtime.py                           # 代理探测、动态代理获取、gost 生命周期
   logging.py                           # 代理运行时日志
+
+src/binance_cloud/
+  api.py                               # Linux 云端任务 API 与回调
+  database.py                          # SQLite 任务、凭证、日志持久化
+  worker.py                            # Windows 执行 Worker
+  protocols.py                         # 云端/Worker 请求协议
 output/
   success_accounts.txt                 # 成功的账号
   failed_accounts.txt                  # 失败的账号
@@ -107,12 +115,25 @@ output/
 
 ### 云端 API 与 Windows Worker（实验性服务入口）
 
+两端都应在项目根目录创建虚拟环境。Linux 云端额外安装服务依赖：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-server.txt
+```
+
 Linux 云端启动 API：
 
 ```bash
 PYTHONPATH=src BINANCE_CLOUD_DB=data/binance.db BINANCE_WINDOWS_WORKER_URL=https://windows.example.com \
   uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
 ```
+
+Linux 至少需要设置 `BINANCE_CLOUD_DB`、`BINANCE_WINDOWS_WORKER_URL` 和
+`BINANCE_CALLBACK_URL`（后者用于创建任务时传给 Worker）。可选运行参数：
+`BINANCE_TASK_LEASE_SECONDS`（默认 1800 秒）、`BINANCE_WORKER_TOKEN`、
+`BINANCE_CALLBACK_TOKEN`。数据库父目录需由运行用户具备写权限。
 
 Windows 启动执行服务（需在 Worker 目录准备 `config.json`）：
 
@@ -121,6 +142,12 @@ $env:BINANCE_WORKER_BASE_DIR = "C:\\binance-worker"
 $env:BINANCE_CALLBACK_URL = "https://linux.example.com/api/worker/callback"
 python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
 ```
+
+Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
+`playwright install chromium`；`BINANCE_WORKER_BASE_DIR` 必须指向包含
+`config.json`、账号/输出目录的 Worker 工作目录。若 Linux 启用了
+`BINANCE_WORKER_TOKEN`，Windows 端也必须设置同名变量；回调鉴权可另设
+`BINANCE_CALLBACK_TOKEN`。
 
 接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。请求体的 `mode` 可选 `login` 或 `register`，同一 Worker 可并行处理两种独立流程；当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 流程。
 

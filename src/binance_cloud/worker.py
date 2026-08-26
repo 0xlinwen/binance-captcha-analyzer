@@ -30,10 +30,13 @@ def _config_for_task(proxy: dict, mode: str) -> dict:
         CONFIG = load_config(BASE_DIR)
     config = dict(CONFIG)
     configured = dict(CONFIG.get("proxy") or {})
-    mode = str(proxy.get("mode", "direct")).lower()
-    if mode == "direct":
+    task_mode = str(mode).strip().lower()
+    if task_mode not in {"login", "register"}:
+        raise ValueError("任务 mode 只支持 login/register")
+    proxy_mode = str(proxy.get("mode", "direct")).strip().lower()
+    if proxy_mode == "direct":
         configured["enabled"] = False
-    elif mode == "fixed":
+    elif proxy_mode == "fixed":
         address = str(proxy.get("address") or "")
         if "://" in address:
             address = address.split("://", 1)[1]
@@ -46,7 +49,7 @@ def _config_for_task(proxy: dict, mode: str) -> dict:
     else:
         raise ValueError("proxy.mode 只支持 direct/fixed")
     config["proxy"] = configured
-    config["mode"] = mode
+    config["mode"] = task_mode
     return config
 
 
