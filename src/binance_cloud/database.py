@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS login_jobs (
-  id TEXT PRIMARY KEY, status TEXT NOT NULL, proxy_mode TEXT NOT NULL DEFAULT 'direct',
+  id TEXT PRIMARY KEY, status TEXT NOT NULL, task_mode TEXT NOT NULL DEFAULT 'login', proxy_mode TEXT NOT NULL DEFAULT 'direct',
   proxy_address TEXT, max_accounts_per_proxy INTEGER, total_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
@@ -70,6 +70,9 @@ class Database:
         self.conn.commit()
 
     def _migrate_columns(self) -> None:
+        job_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_jobs)")}
+        if "task_mode" not in job_columns:
+            self.conn.execute("ALTER TABLE login_jobs ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'login'")
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_job_items)")}
         for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2")):
             if name not in columns:
@@ -91,10 +94,13 @@ class Database:
                 (email, password, client_id, refresh_token, now, now))
             return self._one("SELECT * FROM accounts WHERE email=?", (email,))
 
-    def create_job(self, accounts: list[dict], proxy: dict | None = None) -> dict:
+    def create_job(self, accounts: list[dict], proxy: dict | None = None, *, task_mode: str = "login") -> dict:
         if not accounts:
             raise ValueError("任务至少需要一个账号")
         proxy = proxy or {}
+        task_mode = str(task_mode).strip().lower()
+        if task_mode not in {"login", "register"}:
+            raise ValueError("task_mode 只支持 login/register")
         mode = str(proxy.get("mode", "direct")).lower()
         if mode not in {"direct", "fixed"}:
             raise ValueError("proxy.mode 只支持 direct/fixed")
@@ -104,8 +110,8 @@ class Database:
             raise ValueError("固定代理必须配置 address 和正整数 max_accounts_per_job")
         now, job_id = utc_now(), str(uuid.uuid4())
         with self._lock, self.conn:
-            self.conn.execute("INSERT INTO login_jobs(id,status,proxy_mode,proxy_address,max_accounts_per_proxy,total_count,created_at) VALUES(?,?,?,?,?,?,?)",
-                              (job_id, "submitted", mode, address, limit, len(accounts), now))
+            self.conn.execute("INSERT INTO login_jobs(id,status,task_mode,proxy_mode,proxy_address,max_accounts_per_proxy,total_count,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                              (job_id, "submitted", task_mode, mode, address, limit, len(accounts), now))
             quota_exceeded = 0
             for index, account in enumerate(accounts):
                 self.conn.execute("""INSERT INTO accounts(email,password,client_id,refresh_token,created_at,updated_at)
@@ -127,7 +133,7 @@ class Database:
         account = self._one("SELECT email,password,client_id,refresh_token FROM accounts WHERE id=?", (account_id,))
         if not account:
             raise ValueError("账号不存在")
-        return self.create_job([account], proxy)
+        return self.create_job([account], proxy, task_mode="login")
 
     def get_job(self, job_id: str):
         job = self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
@@ -145,6 +151,7 @@ class Database:
             raise ValueError("任务不存在")
         return {
             "job_id": job_id,
+            "mode": job["task_mode"],
             "proxy": {"mode": job["proxy_mode"], "address": job["proxy_address"], "max_accounts_per_job": job["max_accounts_per_proxy"]},
             "accounts": [
                 {"job_item_id": item["id"], "account_id": item["account_id"], "email": item["email"],

@@ -48,6 +48,32 @@ def _has_visible_captcha_popup(page) -> bool:
         return False
 
 
+def _business_registration_visible(page) -> bool:
+    """识别误进入企业注册页，避免把企业表单当作个人注册继续填写。"""
+    try:
+        url = page.url.lower()
+        if "/register/business" in url or "/register/enterprise" in url:
+            return True
+        element = page.query_selector('input[name="entityname"]:visible')
+        return bool(element and element.is_visible())
+    except Exception:
+        return False
+
+
+def _return_to_personal_registration(page, logger) -> bool:
+    for label in ("个人注册", "注册个人账户", "Sign up as an individual", "Sign up as an individual account"):
+        try:
+            button = page.get_by_role("button", name=label, exact=True).first
+            if button.count() and button.is_visible():
+                button.click(timeout=3000)
+                page.wait_for_timeout(1200)
+                logger.info("已从企业注册页返回个人注册: %s", label)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _retry_register_submit_ack_error(page, email_addr: str, logger=None, max_attempts: int = 3) -> bool:
     """处理注册提交后的 600010 等已知晓弹窗，重新提交最多指定次数。"""
     for attempt in range(1, max(1, int(max_attempts)) + 1):
@@ -202,6 +228,16 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             last_url_pattern = url_pattern
 
         logger.info(f"注册迭代 {iteration + 1} URL状态: {url_pattern} (重试 {url_retry_counts.get(url_pattern, 1)}/{MAX_URL_RETRIES})")
+
+        if _business_registration_visible(page):
+            logger.warning("检测到企业注册页面，尝试返回个人注册")
+            if not _return_to_personal_registration(page, logger):
+                try:
+                    page.goto("https://accounts.binance.com/zh-CN/register", wait_until="domcontentloaded", timeout=page_timeout)
+                except Exception:
+                    cleanup_listeners()
+                    return AccountStatus.FAILED
+            continue
 
         # 检测风控错误（208061/208075 等频率限制）
         has_risk, body_text = _has_risk_error(page, logger)

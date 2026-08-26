@@ -1,5 +1,6 @@
 """云端 API 与 Worker 的请求协议。"""
 
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -27,6 +28,7 @@ class WorkerAccount(BaseModel):
 
 class ExecuteLoginPayload(BaseModel):
     job_id: str
+    mode: Literal["login", "register"]
     callback_url: str
     accounts: list[WorkerAccount] = Field(min_length=1)
     proxy: dict
