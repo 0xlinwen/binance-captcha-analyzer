@@ -124,7 +124,7 @@ python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
 
 接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 登录流程。
 
-服务鉴权与运行参数通过环境变量配置：`BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN`、`BINANCE_TASK_LEASE_SECONDS`、`BINANCE_COOKIE_CHECK_INTERVAL`。Worker 支持 `/worker/register`、执行期间心跳和回调重试；Linux 的 `/api/accounts/{id}/check-cookie` 使用独立 `cookie_checker.py` 注入 Cookie 访问 Creator Center，只判断页面有效性，不读取 API Key/昵称/用户名。
+当前默认不启用 API/Worker 鉴权：未设置 `BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN` 时相关接口直接放行。若后续设置这些环境变量，代码会按 `X-Worker-Token` 请求头执行可选校验。其他运行参数包括 `BINANCE_TASK_LEASE_SECONDS`、`BINANCE_COOKIE_CHECK_INTERVAL`。Linux 后台定时任务使用独立 `cookie_checker.py`，向 Creator Center 发起带 Cookie 的 HTTP POST，只更新 `valid/expired/unknown` 状态，不启动浏览器、不读取 API Key/昵称/用户名；前端不参与检查流程。
 
 附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务并按 `BINANCE_COOKIE_CHECK_INTERVAL` 检查 Cookie。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
 

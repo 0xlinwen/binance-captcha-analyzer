@@ -186,7 +186,7 @@ def _check_cookie(value: dict):
         expires = value.get("cookie_expires_at")
         if expires and expires < datetime.now(timezone.utc).isoformat():
             return db.update_credential_check(value["account_id"], "expired", "cookie_expires_at 已过期")
-        result = check_creator_center_cookie(value["cookie"], page_timeout=20000)
+        result = check_creator_center_cookie(value["cookie"], timeout=20)
         status, error = result.status, result.reason
     except requests.RequestException as exc:
         status, error = "unknown", str(exc)
