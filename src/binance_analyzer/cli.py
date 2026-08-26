@@ -51,7 +51,9 @@ def process_account(args):
 
     for attempt in range(max_retries):
         try:
-            status = register_account(base_dir, email_addr, password, config, worker_id=worker_id)
+            automation_result = register_account(base_dir, email_addr, password, config, worker_id=worker_id)
+            # 兼容外部注入的旧式驱动（测试/第三方调用），正式编排始终返回 AutomationResult。
+            status = automation_result.status if hasattr(automation_result, "status") else automation_result
             last_status = status
             if status is AccountStatus.SUCCESS or status.is_terminal_without_retry:
                 return AccountResult(email_addr, password, status).to_process_tuple()

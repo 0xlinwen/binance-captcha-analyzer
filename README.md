@@ -122,7 +122,7 @@ $env:BINANCE_CALLBACK_URL = "https://linux.example.com/api/worker/callback"
 python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
 ```
 
-接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 登录流程。
+接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。请求体的 `mode` 可选 `login` 或 `register`，同一 Worker 可并行处理两种独立流程；当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 流程。
 
 当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须配置 `BINANCE_WINDOWS_WORKER_URL` 与 `BINANCE_CALLBACK_URL`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
 

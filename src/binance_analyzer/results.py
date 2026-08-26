@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .credential_export import CredentialSnapshot
 
 
 class AccountStatus(str, Enum):
@@ -61,6 +65,34 @@ class AccountStatus(str, Enum):
             self.EMAIL_VERIFICATION_REQUIRED,
             self.AUTH_FAILED,
         }
+
+    @property
+    def retryable(self) -> bool:
+        """统一暴露给 API/Worker 的重试语义。"""
+        return self in {self.PROXY_FAILED, self.RATE_LIMITED}
+
+    @property
+    def outcome_unknown(self) -> bool:
+        """表示流程是否可能在提交后失去结果确认。"""
+        return self in {self.PROXY_FAILED, self.RATE_LIMITED, self.FAILED}
+
+
+@dataclass(frozen=True)
+class AutomationResult:
+    """单次登录/注册的统一结果载体。"""
+
+    status: AccountStatus
+    credentials: "CredentialSnapshot | None" = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+    @classmethod
+    def from_status(cls, status: AccountStatus, *, message: str | None = None) -> "AutomationResult":
+        return cls(
+            status=status,
+            error_code=None if status is AccountStatus.SUCCESS else status.value,
+            error_message=message,
+        )
 
 
 @dataclass(frozen=True)

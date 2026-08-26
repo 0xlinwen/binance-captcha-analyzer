@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi import Header
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from .database import Database
 from .protocols import CallbackPayload
@@ -44,6 +45,7 @@ class ProxyIn(BaseModel):
 
 
 class JobIn(BaseModel):
+    mode: Literal["login", "register"] = "login"
     accounts: list[AccountIn] = Field(min_length=1)
     proxy: ProxyIn = ProxyIn()
 
@@ -63,7 +65,7 @@ def create_job(request: JobIn):
     try:
         if not WINDOWS_WORKER_URL or not os.getenv("BINANCE_CALLBACK_URL"):
             raise ValueError("必须配置 BINANCE_WINDOWS_WORKER_URL 和 BINANCE_CALLBACK_URL")
-        job = db.create_job([a.model_dump() for a in request.accounts], request.proxy.model_dump())
+        job = db.create_job([a.model_dump() for a in request.accounts], request.proxy.model_dump(), task_mode=request.mode)
         db.mark_job_running(job["id"])
         if WINDOWS_WORKER_URL:
             payload = db.worker_payload(job["id"])

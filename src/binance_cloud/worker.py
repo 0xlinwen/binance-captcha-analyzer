@@ -24,7 +24,7 @@ CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", WORKER_TOKEN)
 WORKER_ID = os.getenv("BINANCE_WORKER_ID", "windows-01")
 
 
-def _config_for_task(proxy: dict) -> dict:
+def _config_for_task(proxy: dict, mode: str) -> dict:
     global CONFIG
     if CONFIG is None:
         CONFIG = load_config(BASE_DIR)
@@ -46,6 +46,7 @@ def _config_for_task(proxy: dict) -> dict:
     else:
         raise ValueError("proxy.mode 只支持 direct/fixed")
     config["proxy"] = configured
+    config["mode"] = mode
     return config
 
 
@@ -67,7 +68,7 @@ def execute(payload: dict) -> None:
     callback_headers = {"X-Worker-Token": CALLBACK_TOKEN} if CALLBACK_TOKEN else {}
     callback_base = callback_url.rsplit("/api/", 1)[0]
     try:
-        task_config = _config_for_task(payload.get("proxy") or {})
+        task_config = _config_for_task(payload.get("proxy") or {}, payload["mode"])
     except Exception as exc:
         for account in payload["accounts"]:
             _send_callback(callback_url, {"job_id": job_id, "job_item_id": account["job_item_id"],
@@ -75,7 +76,7 @@ def execute(payload: dict) -> None:
                                           "status": "failed", "error_code": "worker_config_error",
                                           "error_message": str(exc)}, callback_headers)
         return
-    for index, account in enumerate(payload["accounts"]):
+    for account in payload["accounts"]:
         email, password = account["email"], account["password"]
         if account.get("client_id") and account.get("refresh_token") and "----" not in password:
             password = f"{password}----{account['client_id']}----{account['refresh_token']}"
@@ -97,14 +98,22 @@ def execute(payload: dict) -> None:
                             pass
                 heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
                 heartbeat_thread.start()
-            result_holder = {}
-            status = register_account(BASE_DIR, email, password, task_config, worker_id=index, result_sink=result_holder.update)
-            callback_status = status.value if status.value in {"success", "failed", "retryable", "proxy_failed", "rate_limited"} else "failed"
+            worker_slot = abs(hash(f"{job_id}:{account['job_item_id']}")) % 1_000_000_000
+            automation_result = register_account(BASE_DIR, email, password, task_config, worker_id=worker_slot)
+            status = automation_result.status if hasattr(automation_result, "status") else automation_result
+            credentials = getattr(automation_result, "credentials", None)
+            if status.value == "success" and credentials is None:
+                callback_status = "failed"
+                callback_error_code = "credentials_missing"
+            else:
+                callback_status = status.value if status.value in {"success", "failed", "proxy_failed", "rate_limited"} else "failed"
+                callback_error_code = None if callback_status == "success" else (getattr(automation_result, "error_code", None) or status.value)
             result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": callback_status,
-                      "error_code": None if callback_status == "success" else status.value}
-            if status.value == "success":
-                result.update({"cookie": result_holder["cookie"], "csrftoken": result_holder.get("csrftoken"),
-                               "cookie_expires_at": result_holder.get("cookie_expires_at")})
+                      "error_code": callback_error_code,
+                      "error_message": "登录成功但未导出凭证" if callback_error_code == "credentials_missing" else getattr(automation_result, "error_message", None)}
+            if callback_status == "success":
+                result.update({"cookie": credentials.cookie, "csrftoken": credentials.csrftoken,
+                               "cookie_expires_at": credentials.cookie_expires_at})
         except Exception as exc:
             result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
         finally:

@@ -11,7 +11,7 @@ from binance_analyzer.orchestrator import (
     _record_used_proxy_ip,
     register_account,
 )
-from binance_analyzer.results import AccountStatus
+from binance_analyzer.results import AccountStatus, AutomationResult
 
 
 class OrchestratorProxyIpTests(unittest.TestCase):
@@ -121,7 +121,8 @@ class OrchestratorProxyIpTests(unittest.TestCase):
             },
         )
 
-        self.assertIs(result, AccountStatus.PROXY_FAILED)
+        self.assertIsInstance(result, AutomationResult)
+        self.assertIs(result.status, AccountStatus.PROXY_FAILED)
         mock_create_proxy_runtime.assert_called_once()
         mock_build_stealth_context.assert_not_called()
 

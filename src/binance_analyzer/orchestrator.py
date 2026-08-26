@@ -1,13 +1,11 @@
-import hashlib
 import random
 import shutil
-from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from .login_flow import login_with_url_state
-from .register_flow import register_with_url_state
+from .automation_driver import build_driver
 from .proxy_ip_storage import append_used_proxy_ip, load_used_proxy_ips
 from .registered_account_storage import save_registered_account
 from .local_cache import init_cache_manager
@@ -26,10 +24,11 @@ from .proxy_integration import (
     make_proxy_logger,
     stop_managed_proxy_runtime,
 )
-from .results import AccountStatus
+from .results import AccountStatus, AutomationResult
 from .page_signals import is_dashboard_url
 from .creator_api import api_metadata, extract_creator_api
 from .creator_api_quota import acquire_creator_api_slot, release_creator_api_slot
+from .credential_export import export_credentials
 
 PAGE_TIMEOUT = 60000
 DEFAULT_USED_PROXY_IPS_FILE = "output/used_proxy_ips.txt"
@@ -237,32 +236,6 @@ def _sync_new_cache_to_master(worker_id: int):
     shutil.rmtree(worker_dir, ignore_errors=True)
 
 
-def extract_cookies_and_csrf(page, *, include_expiry: bool = False):
-    context = page.context
-    cookies = context.cookies()
-    cookie_string = "; ".join([
-        f"{c['name']}={c['value']}"
-        for c in cookies if "binance" in c.get("domain", "")
-    ])
-    cookie_map = {c["name"]: c["value"] for c in cookies if "binance" in c.get("domain", "")}
-    csrftoken = None
-    if "cr00" in cookie_map:
-        csrftoken = hashlib.md5(cookie_map["cr00"].encode()).hexdigest()
-        print(f"cr00: {cookie_map['cr00'][:20]}...")
-        print(f"csrftoken (md5): {csrftoken}")
-    else:
-        csrftoken = cookie_map.get("csrftoken")
-        if csrftoken:
-            print(f"csrftoken (cookie): {csrftoken}")
-        else:
-            print("警告: 未找到 cr00，无法计算 csrftoken")
-    expires = [c.get("expires") for c in cookies if "binance" in c.get("domain", "") and c.get("expires")]
-    cookie_expires_at = datetime.fromtimestamp(min(expires), timezone.utc).isoformat() if expires else None
-    if include_expiry:
-        return cookie_string, csrftoken, cookie_expires_at
-    return cookie_string, csrftoken
-
-
 def _finish_flow_status(status: AccountStatus, worker_id: int, *, mode: str):
     """统一处理登录/注册流程返回状态，成功时返回 None 继续后续 cookie 提取。"""
     if status is AccountStatus.SUCCESS:
@@ -283,7 +256,7 @@ def _finish_flow_status(status: AccountStatus, worker_id: int, *, mode: str):
     return status
 
 
-def register_account(base_dir: Path, email_addr: str, email_password: str, config: dict, worker_id: int = 0, result_sink=None) -> AccountStatus:
+def register_account(base_dir: Path, email_addr: str, email_password: str, config: dict, worker_id: int = 0) -> AutomationResult:
     output_file  = config["output_file"]
     headless     = config.get("headless", False)
     proxy_config = config.get("proxy", {})
@@ -344,11 +317,11 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                 elif not recorded_proxy_ip:
                     print(f"[Worker-{worker_id}] 代理出口IP未记录，停止当前账号并重试")
                     stop_managed_proxy_runtime(proxy_runtime)
-                    return AccountStatus.PROXY_FAILED
+                    return AutomationResult.from_status(AccountStatus.PROXY_FAILED)
             else:
                 print(f"[Worker-{worker_id}] 代理初始化失败，停止当前账号并重试")
                 stop_managed_proxy_runtime(proxy_runtime)
-                return AccountStatus.PROXY_FAILED
+                return AutomationResult.from_status(AccountStatus.PROXY_FAILED)
 
         print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（完整反检测）")
         browser, context, page = build_stealth_context(p, fingerprint, proxy_settings, headless)
@@ -363,22 +336,17 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
             print(f"[Worker-{worker_id}] 缓存已启用")
 
         try:
-            if mode == "register":
-                print(f"\n[Worker-{worker_id}] 模式: 注册")
-                reg_result = register_with_url_state(
-                    page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT
+            print(f"\n[Worker-{worker_id}] 模式: {'注册' if mode == 'register' else '登录'}")
+            automation_result = build_driver(mode).run(
+                page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT
+            )
+            flow_result = _finish_flow_status(automation_result.status, worker_id, mode=mode)
+            if flow_result is not None:
+                return replace(
+                    automation_result,
+                    status=flow_result,
+                    error_code=flow_result.value,
                 )
-                flow_result = _finish_flow_status(reg_result, worker_id, mode=mode)
-                if flow_result is not None:
-                    return flow_result
-            else:
-                print(f"\n[Worker-{worker_id}] 模式: 登录")
-                result = login_with_url_state(
-                    page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT
-                )
-                flow_result = _finish_flow_status(result, worker_id, mode=mode)
-                if flow_result is not None:
-                    return flow_result
 
             # 访问 dashboard
             print(f"\n[Worker-{worker_id}] 访问 dashboard...")
@@ -405,7 +373,9 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
 
             # 提取 cookie
             print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
-            cookie_string, csrftoken, cookie_expires_at = extract_cookies_and_csrf(page, include_expiry=True)
+            credentials = export_credentials(page)
+            automation_result = replace(automation_result, credentials=credentials)
+            cookie_string, csrftoken, cookie_expires_at = credentials.cookie, credentials.csrftoken, credentials.cookie_expires_at
             if cookie_string and csrftoken:
                 account_data = {
                     "name":             f"账号_{email_addr.split('@')[0]}",
@@ -422,9 +392,6 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "mail_api_url":     "https://wrpifa-com.netlify.app/",
                 }
                 save_registered_account(base_dir, output_file, account_data)
-                if result_sink is not None:
-                    result_sink(dict(account_data))
-
                 creator_cfg = config.get("creator_api", {})
                 if creator_cfg.get("enabled"):
                     slot_token = acquire_creator_api_slot(base_dir, config)
@@ -443,14 +410,14 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                             release_creator_api_slot(base_dir, config, slot_token, completed=True)
                             print(f"[Worker-{worker_id}] API 提取成功（已隐藏密钥）")
                 print(f"\n[Worker-{worker_id}] 处理成功: {email_addr}")
-                return AccountStatus.SUCCESS
+                return automation_result
 
             print(f"[Worker-{worker_id}] 未能获取有效的 cookie 或 csrftoken")
-            return AccountStatus.FAILED
+            return AutomationResult.from_status(AccountStatus.FAILED, message="未能获取有效的 cookie 或 csrftoken")
 
         except Exception as e:
             print(f"[Worker-{worker_id}] 处理过程出错: {e}")
-            return AccountStatus.FAILED
+            return AutomationResult.from_status(AccountStatus.FAILED, message=str(e))
         finally:
             if config.get("cache", {}).get("enabled", False):
                 try:
