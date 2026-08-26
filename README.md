@@ -105,8 +105,23 @@ output/
 
 ## 安装
 
+### Windows PowerShell
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+playwright install chromium
+```
+
+### macOS / Linux
+
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 playwright install chromium
 ```
 
@@ -115,6 +130,9 @@ playwright install chromium
 - `requests` - OpenRouter API / Outlook 邮件 API 调用
 - `opencv-python` + `numpy` - 历史验证码图像处理依赖，当前主流程不直接依赖其完成坐标点击
 - `psutil` - 进程管理（信号处理时终止子进程）
+- `portalocker` - Windows、macOS 和 Linux 通用的多进程文件锁
+
+项目不依赖 Unix 专属的 `fcntl`。Windows 环境无需、也不能执行 `pip install fcntl`。
 
 ## 配置
 

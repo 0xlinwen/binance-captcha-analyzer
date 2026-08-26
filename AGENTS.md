@@ -4,7 +4,8 @@
 
 - 目标：自动化处理 Binance 登录/注册流程，包含浏览器自动化、验证码识别、邮箱验证码提取、代理运行时和结果持久化。
 - 当前进展：主流程已按入口层、编排层、登录/注册流程、动作/验证码/邮箱/存储能力模块拆分；代理能力已抽为 `src/proxy_forwarder` 可复用包。
-- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象，降低状态机维护成本；用真实登录复测创作者中心 API 提取（点击入口 + 弹窗读密钥）。
+- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象；真实登录复测创作者中心 API 提取仍待安排。
+- 最近完成：文件锁已改为 `src/binance_analyzer/file_lock.py` + `portalocker`，账号存储、代理 IP 存储、注册账号存储和创作者 API 配额均不再直接依赖 Unix-only 的 `fcntl`，Windows/macOS 共用同一实现。
 - 最近完成：登录/注册成功后的 Dashboard 判定改为使用 `page_signals.is_dashboard_url()`；Creator API 入口点击后会等待导航并切换到新打开的 tab，避免在旧页面读取密钥。
 - 最近实测：2026-08-20 真实登录 `accounts.txt` 中的 2 个账号均通过邮箱 MFA 并写入 Cookie/CSRF；Creator Center 页面实际按钮文案为“创建 API 密钥”，已加入提取入口选择器。因成功账号已从队列移除，修复后的 API 真实读取尚未复测。
 - 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `output/creator_api_debug/` 截图与文本并失败，不再从整页文本猜值。已清理 `output/registered_accounts.json` 中错误 API 字段。
@@ -47,6 +48,7 @@ python main.py --refresh-cache
 ## 环境要求
 
 - Python：建议 3.10+。
+- 依赖：`requirements.txt` 包含 `portalocker>=2.8,<4`，用于跨平台文件锁。
 - 浏览器：主流程使用本机 Google Chrome（可用 `CHROME_PATH` 覆盖路径）；缓存预热仍用 `channel="chrome"`。Playwright 包仍需安装以便 CDP 控制。
 - 必需配置：`config.json`，可从 `config.example.json` 复制。
 - 必需凭证：`OPENROUTER_API_KEY` 或 `config.json.openrouter_api_key`。
@@ -78,6 +80,10 @@ python main.py --refresh-cache
 - 现象：代理失败文本能被代理检测函数识别，但没有进入通用风险分支。
   原因：`has_risk` 只检查通用风控关键词，未包含代理失败关键词。
   解决方案：`assess_risk_text()` 将代理失败和认证失败也纳入 `has_risk`。
+
+- 现象：Windows 原生 Python 启动时提示 `ModuleNotFoundError: No module named 'fcntl'`，`pip install fcntl` 无可用发行版。
+  原因：`fcntl` 是 Unix 标准库模块，不支持 Windows。
+  解决方案：统一通过 `file_lock.py` 调用 `portalocker`，保留共享锁/排他锁语义；完整测试在 macOS 环境 149 项通过。
 
 - 现象：配置错误或页面结构变化时，流程可能继续走宽泛兜底，导致看似运行、实际状态不可控。
   原因：旧代码存在直连预热、未知 mode 回退、宽泛输入框、JS 隐藏弹窗等降级路径。

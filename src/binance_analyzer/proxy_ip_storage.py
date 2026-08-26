@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import fcntl
 from pathlib import Path
+
+from .file_lock import lock, unlock
 
 
 def load_used_proxy_ips(base_dir: Path, used_ips_file: str) -> set[str]:
@@ -14,7 +15,7 @@ def load_used_proxy_ips(base_dir: Path, used_ips_file: str) -> set[str]:
 
     lock_path = used_ips_path.with_suffix(f"{used_ips_path.suffix}.lock")
     with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        lock(lock_file, shared=True)
         try:
             with open(used_ips_path, "r", encoding="utf-8") as file:
                 return {
@@ -23,7 +24,7 @@ def load_used_proxy_ips(base_dir: Path, used_ips_file: str) -> set[str]:
                     if line.strip() and not line.lstrip().startswith("#")
                 }
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(lock_file)
 
 
 def append_used_proxy_ip(base_dir: Path, used_ips_file: str, exit_ip: str) -> bool:
@@ -38,7 +39,7 @@ def append_used_proxy_ip(base_dir: Path, used_ips_file: str, exit_ip: str) -> bo
     appended = False
 
     with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        lock(lock_file)
         try:
             existing_ips = set()
             if used_ips_path.exists():
@@ -54,6 +55,6 @@ def append_used_proxy_ip(base_dir: Path, used_ips_file: str, exit_ip: str) -> bo
                     file.write(f"{ip}\n")
                 appended = True
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(lock_file)
 
     return appended

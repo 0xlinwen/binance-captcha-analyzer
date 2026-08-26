@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import time
 import uuid
 from pathlib import Path
+
+from .file_lock import lock, unlock
 
 
 STATE_FILE = ".creator_api_quota.json"
@@ -41,7 +42,7 @@ def _lock(path: Path):
     lock_path = path.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w", encoding="utf-8")
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    lock(lock_file)
     return lock_file
 
 
@@ -63,7 +64,7 @@ def acquire_creator_api_slot(base_dir: Path, config: dict) -> str | None:
                 path.write_text(json.dumps(state), encoding="utf-8")
                 return token
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(lock_file)
             lock_file.close()
         if time.monotonic() >= deadline:
             raise RuntimeError("等待创作者 API 提取名额超时")
@@ -82,5 +83,5 @@ def release_creator_api_slot(base_dir: Path, config: dict, token: str, *, comple
             state["completed"] += 1
         path.write_text(json.dumps(state), encoding="utf-8")
     finally:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        unlock(lock_file)
         lock_file.close()
