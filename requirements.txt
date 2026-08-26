@@ -3,3 +3,6 @@ requests
 opencv-python
 numpy
 psutil
+portalocker>=2.8,<4
+fastapi>=0.115,<1
+uvicorn>=0.34,<1

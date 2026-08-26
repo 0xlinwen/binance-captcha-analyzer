@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import shutil
 from datetime import datetime
 from pathlib import Path
+
+from .file_lock import lock, unlock
 
 
 LOGIN_MANAGED_FIELDS = {
@@ -41,7 +42,7 @@ def save_registered_account(base_dir: Path, output_file: str, account_data: dict
     account_identity = registered_account_identity(account_data)
 
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        lock(lock_file)
         try:
             data = {"accounts": []}
             if output_path.exists() and output_path.stat().st_size > 0:
@@ -82,4 +83,4 @@ def save_registered_account(base_dir: Path, output_file: str, account_data: dict
             with open(output_path, "w", encoding="utf-8") as file:
                 json.dump(data, file, ensure_ascii=False, indent=2)
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(lock_file)

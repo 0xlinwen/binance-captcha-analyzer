@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import fcntl
 from pathlib import Path
+
+from .file_lock import lock, unlock
 
 
 def parse_account_line(line: str) -> tuple[str, str] | None:
@@ -43,7 +44,7 @@ def remove_account_from_file(base_dir: Path, accounts_file: str, email_addr: str
     removed = False
 
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        lock(lock_file)
         try:
             with open(accounts_path, "r", encoding="utf-8") as file:
                 lines = file.readlines()
@@ -60,7 +61,7 @@ def remove_account_from_file(base_dir: Path, accounts_file: str, email_addr: str
                 with open(accounts_path, "w", encoding="utf-8") as file:
                     file.writelines(kept_lines)
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(lock_file)
 
     return removed
 
@@ -73,7 +74,7 @@ def append_account_result(filepath: Path, email_addr: str, password: str, delimi
     appended = False
 
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        lock(lock_file)
         try:
             existing_emails = set()
             if filepath.exists():
@@ -88,6 +89,6 @@ def append_account_result(filepath: Path, email_addr: str, password: str, delimi
                     file.write(target_line)
                 appended = True
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(lock_file)
 
     return appended

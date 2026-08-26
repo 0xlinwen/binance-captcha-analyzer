@@ -105,8 +105,46 @@ output/
 
 ## 安装
 
+### 云端 API 与 Windows Worker（实验性服务入口）
+
+Linux 云端启动 API：
+
 ```bash
-pip install -r requirements.txt
+PYTHONPATH=src BINANCE_CLOUD_DB=data/binance.db BINANCE_WINDOWS_WORKER_URL=https://windows.example.com \
+  uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
+```
+
+Windows 启动执行服务（需在 Worker 目录准备 `config.json`）：
+
+```powershell
+$env:BINANCE_WORKER_BASE_DIR = "C:\\binance-worker"
+$env:BINANCE_CALLBACK_URL = "https://linux.example.com/api/worker/callback"
+python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
+```
+
+接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 登录流程。
+
+当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须配置 `BINANCE_WINDOWS_WORKER_URL` 与 `BINANCE_CALLBACK_URL`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
+
+附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
+
+### Windows PowerShell
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+playwright install chromium
+```
+
+### macOS / Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 playwright install chromium
 ```
 
@@ -115,6 +153,9 @@ playwright install chromium
 - `requests` - OpenRouter API / Outlook 邮件 API 调用
 - `opencv-python` + `numpy` - 历史验证码图像处理依赖，当前主流程不直接依赖其完成坐标点击
 - `psutil` - 进程管理（信号处理时终止子进程）
+- `portalocker` - Windows、macOS 和 Linux 通用的多进程文件锁
+
+项目不依赖 Unix 专属的 `fcntl`。Windows 环境无需、也不能执行 `pip install fcntl`。
 
 ## 配置
 

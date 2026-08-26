@@ -4,7 +4,8 @@
 
 - 目标：自动化处理 Binance 登录/注册流程，包含浏览器自动化、验证码识别、邮箱验证码提取、代理运行时和结果持久化。
 - 当前进展：主流程已按入口层、编排层、登录/注册流程、动作/验证码/邮箱/存储能力模块拆分；代理能力已抽为 `src/proxy_forwarder` 可复用包。
-- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象，降低状态机维护成本；用真实登录复测创作者中心 API 提取（点击入口 + 弹窗读密钥）。
+- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象；真实登录复测创作者中心 API 提取仍待安排。
+- 最近完成：文件锁已改为 `src/binance_analyzer/file_lock.py` + `portalocker`，账号存储、代理 IP 存储、注册账号存储和创作者 API 配额均不再直接依赖 Unix-only 的 `fcntl`，Windows/macOS 共用同一实现。
 - 最近完成：登录/注册成功后的 Dashboard 判定改为使用 `page_signals.is_dashboard_url()`；Creator API 入口点击后会等待导航并切换到新打开的 tab，避免在旧页面读取密钥。
 - 最近实测：2026-08-20 真实登录 `accounts.txt` 中的 2 个账号均通过邮箱 MFA 并写入 Cookie/CSRF；Creator Center 页面实际按钮文案为“创建 API 密钥”，已加入提取入口选择器。因成功账号已从队列移除，修复后的 API 真实读取尚未复测。
 - 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `output/creator_api_debug/` 截图与文本并失败，不再从整页文本猜值。已清理 `output/registered_accounts.json` 中错误 API 字段。
@@ -12,6 +13,10 @@
 - 最近修复：创作者中心进页后无点击、弹窗已有密钥仍失败。入口「查看 API >」无法 exact 匹配；新手引导层会挡住点击；密钥是「API 密钥」标签后的纯文本而不是 input。提取器改为包含匹配、先关引导、禁止 `networkidle` 空等，并按标签读取密钥。真实页面点击尚未复测。
 - 最近完成：提取 API 密钥后同时读取资料卡展示名称（`@Square-Creator-` 前方的 display_name，例如 `Alan Searchfield diwl`），写入 `registered_accounts.json` 的 `display_name`。找不到名称时密钥仍保存，display_name 留空。
 - 最近完成：抽完 API key 后点击「编辑」，从「编辑个人资料」读取「昵称」写入 `display_name`、「用户名」写入 `username`，然后点取消关闭，不改资料。
+- 最近完成：新增 `src/binance_cloud/` 实验性 SQLite 云端 API 与 Windows Worker 入口；Linux 创建登录任务并异步 POST 给 Windows，Windows 复用 `register_account`，每个账号完成后回调 Linux；Cookie 额外记录 `cookie_expires_at`，SQLite 长字段使用 `TEXT`。
+- 最近完成：云端服务保留可选 Worker/回调 Token 校验（默认未配置时放行），并增加 Worker 注册与执行心跳、任务租约超时回收、固定代理任务计数和回调重试；新增任务取消、数据库备份、日志清理、SQLite WAL 和部署模板。
+- 最近完成：Worker 任务已传递 `client_id`/`refresh_token`；按需求移除 Cookie 在线检查逻辑、接口、模块、数据库状态字段和测试，Cookie 仍仅在登录成功时保存并保留 `cookie_expires_at`。
+- 最近完成：成功回调缺少 Cookie 时拒绝；新增 `/api/accounts/{id}/relogin` 重新登录入口；全量测试仍为 151 项通过。
 
 ## 架构约定
 
@@ -32,6 +37,7 @@
 - `src/binance_analyzer/creator_api_quota.py`：单次运行 API 提取名额，失败释放、成功占用。
 - `src/binance_analyzer/screenshot_storage.py`：截图清理。
 - `src/proxy_forwarder/`：代理解析、质量检查、本地转发和运行时管理的可复用包；`proxy_utils.py` 放纯代理解析/格式化工具，业务代码通过 `proxy_integration.py` 适配。
+- `src/binance_cloud/`：SQLite 数据库、Linux FastAPI 接口和 Windows 执行服务；服务入口目前为实验性 MVP，生产 HTTPS、真实 Binance 在线检查和双机联调仍待验收。
 
 ## 常用命令
 
@@ -47,6 +53,7 @@ python main.py --refresh-cache
 ## 环境要求
 
 - Python：建议 3.10+。
+- 依赖：`requirements.txt` 包含 `portalocker>=2.8,<4`，用于跨平台文件锁。
 - 浏览器：主流程使用本机 Google Chrome（可用 `CHROME_PATH` 覆盖路径）；缓存预热仍用 `channel="chrome"`。Playwright 包仍需安装以便 CDP 控制。
 - 必需配置：`config.json`，可从 `config.example.json` 复制。
 - 必需凭证：`OPENROUTER_API_KEY` 或 `config.json.openrouter_api_key`。
@@ -78,6 +85,10 @@ python main.py --refresh-cache
 - 现象：代理失败文本能被代理检测函数识别，但没有进入通用风险分支。
   原因：`has_risk` 只检查通用风控关键词，未包含代理失败关键词。
   解决方案：`assess_risk_text()` 将代理失败和认证失败也纳入 `has_risk`。
+
+- 现象：Windows 原生 Python 启动时提示 `ModuleNotFoundError: No module named 'fcntl'`，`pip install fcntl` 无可用发行版。
+  原因：`fcntl` 是 Unix 标准库模块，不支持 Windows。
+  解决方案：统一通过 `file_lock.py` 调用 `portalocker`，保留共享锁/排他锁语义；完整测试在 macOS 环境 149 项通过。
 
 - 现象：配置错误或页面结构变化时，流程可能继续走宽泛兜底，导致看似运行、实际状态不可控。
   原因：旧代码存在直连预热、未知 mode 回退、宽泛输入框、JS 隐藏弹窗等降级路径。

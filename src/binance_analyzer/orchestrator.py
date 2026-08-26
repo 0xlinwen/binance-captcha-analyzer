@@ -1,6 +1,7 @@
 import hashlib
 import random
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -236,7 +237,7 @@ def _sync_new_cache_to_master(worker_id: int):
     shutil.rmtree(worker_dir, ignore_errors=True)
 
 
-def extract_cookies_and_csrf(page):
+def extract_cookies_and_csrf(page, *, include_expiry: bool = False):
     context = page.context
     cookies = context.cookies()
     cookie_string = "; ".join([
@@ -255,6 +256,10 @@ def extract_cookies_and_csrf(page):
             print(f"csrftoken (cookie): {csrftoken}")
         else:
             print("警告: 未找到 cr00，无法计算 csrftoken")
+    expires = [c.get("expires") for c in cookies if "binance" in c.get("domain", "") and c.get("expires")]
+    cookie_expires_at = datetime.fromtimestamp(min(expires), timezone.utc).isoformat() if expires else None
+    if include_expiry:
+        return cookie_string, csrftoken, cookie_expires_at
     return cookie_string, csrftoken
 
 
@@ -278,7 +283,7 @@ def _finish_flow_status(status: AccountStatus, worker_id: int, *, mode: str):
     return status
 
 
-def register_account(base_dir: Path, email_addr: str, email_password: str, config: dict, worker_id: int = 0) -> AccountStatus:
+def register_account(base_dir: Path, email_addr: str, email_password: str, config: dict, worker_id: int = 0, result_sink=None) -> AccountStatus:
     output_file  = config["output_file"]
     headless     = config.get("headless", False)
     proxy_config = config.get("proxy", {})
@@ -400,7 +405,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
 
             # 提取 cookie
             print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
-            cookie_string, csrftoken = extract_cookies_and_csrf(page)
+            cookie_string, csrftoken, cookie_expires_at = extract_cookies_and_csrf(page, include_expiry=True)
             if cookie_string and csrftoken:
                 account_data = {
                     "name":             f"账号_{email_addr.split('@')[0]}",
@@ -408,6 +413,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "password":         email_password,
                     "cookie":           cookie_string,
                     "csrftoken":        csrftoken,
+                    "cookie_expires_at": cookie_expires_at,
                     "enabled":          True,
                     "avatar_changed":   False,
                     "nickname_changed": False,
@@ -416,6 +422,8 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "mail_api_url":     "https://wrpifa-com.netlify.app/",
                 }
                 save_registered_account(base_dir, output_file, account_data)
+                if result_sink is not None:
+                    result_sink(dict(account_data))
 
                 creator_cfg = config.get("creator_api", {})
                 if creator_cfg.get("enabled"):
