@@ -1,6 +1,7 @@
 import hashlib
 import random
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -256,7 +257,7 @@ def extract_cookies_and_csrf(page, *, include_expiry: bool = False):
         else:
             print("警告: 未找到 cr00，无法计算 csrftoken")
     expires = [c.get("expires") for c in cookies if "binance" in c.get("domain", "") and c.get("expires")]
-    cookie_expires_at = min(expires) if expires else None
+    cookie_expires_at = datetime.fromtimestamp(min(expires), timezone.utc).isoformat() if expires else None
     if include_expiry:
         return cookie_string, csrftoken, cookie_expires_at
     return cookie_string, csrftoken

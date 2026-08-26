@@ -126,6 +126,8 @@ python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
 
 服务鉴权与运行参数通过环境变量配置：`BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN`、`BINANCE_TASK_LEASE_SECONDS`、`BINANCE_COOKIE_CHECK_URL`。Worker 支持 `/worker/register`、执行期间心跳和回调重试；Linux 提供 `/api/accounts/{id}/check-cookie` 在线检查凭证，`401/403` 或登录跳转标记为 `expired`，网络异常标记为 `unknown`。
 
+附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务并按 `BINANCE_COOKIE_CHECK_INTERVAL` 检查 Cookie。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
+
 ### Windows PowerShell
 
 ```powershell

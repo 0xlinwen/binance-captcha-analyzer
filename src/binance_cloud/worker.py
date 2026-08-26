@@ -57,6 +57,8 @@ def execute(payload: dict) -> None:
         requests.post(callback_base + f"/api/workers/{WORKER_ID}/register", json={"version": "1"}, headers=headers, timeout=20).raise_for_status()
     for index, account in enumerate(payload["accounts"]):
         email, password = account["email"], account["password"]
+        if account.get("client_id") and account.get("refresh_token") and "----" not in password:
+            password = f"{password}----{account['client_id']}----{account['refresh_token']}"
         heartbeat_stop = threading.Event()
         try:
             heartbeat_thread = None
@@ -73,12 +75,12 @@ def execute(payload: dict) -> None:
                 heartbeat_thread.start()
             result_holder = {}
             status = register_account(BASE_DIR, email, password, task_config, worker_id=index, result_sink=result_holder.update)
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "status": status.value}
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": status.value}
             if status.value == "success":
                 result.update({"cookie": result_holder["cookie"], "csrftoken": result_holder.get("csrftoken"),
                                "cookie_expires_at": result_holder.get("cookie_expires_at")})
         except Exception as exc:
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
         finally:
             heartbeat_stop.set()
         if callback_url:

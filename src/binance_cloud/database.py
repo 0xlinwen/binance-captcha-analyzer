@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +31,7 @@ CREATE TABLE IF NOT EXISTS login_job_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES login_jobs(id),
   account_id INTEGER NOT NULL REFERENCES accounts(id), status TEXT NOT NULL,
   proxy_address TEXT, error_code TEXT, error_message TEXT, started_at TEXT, completed_at TEXT,
-  worker_id TEXT, lease_expires_at TEXT,
+  worker_id TEXT, lease_expires_at TEXT, retry_count INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 2,
   UNIQUE(job_id, account_id)
 );
 CREATE TABLE IF NOT EXISTS login_job_proxy_usage (
@@ -62,15 +63,18 @@ class Database:
         self._lock = threading.RLock()
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         self._migrate_columns()
         self.conn.commit()
 
     def _migrate_columns(self) -> None:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_job_items)")}
-        for name in ("worker_id", "lease_expires_at"):
+        for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2")):
             if name not in columns:
-                self.conn.execute(f"ALTER TABLE login_job_items ADD COLUMN {name} TEXT")
+                self.conn.execute(f"ALTER TABLE login_job_items ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
         self.conn.close()
@@ -105,8 +109,9 @@ class Database:
                               (job_id, "submitted", mode, address, limit, len(accounts), now))
             quota_exceeded = 0
             for index, account in enumerate(accounts):
-                self.conn.execute("INSERT OR IGNORE INTO accounts(email,password,created_at,updated_at) VALUES(?,?,?,?)",
-                                  (account["email"], account["password"], now, now))
+                self.conn.execute("""INSERT INTO accounts(email,password,client_id,refresh_token,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password=excluded.password,client_id=excluded.client_id,refresh_token=excluded.refresh_token,updated_at=excluded.updated_at""",
+                                  (account["email"], account["password"], account.get("client_id"), account.get("refresh_token"), now, now))
                 row = self._one("SELECT id FROM accounts WHERE email=?", (account["email"],))
                 item_status = "queued"
                 if mode == "fixed" and index >= limit:
@@ -134,7 +139,9 @@ class Database:
             "proxy": {"mode": job["proxy_mode"], "address": job["proxy_address"], "max_accounts_per_job": job["max_accounts_per_proxy"]},
             "accounts": [
                 {"job_item_id": item["id"], "account_id": item["account_id"], "email": item["email"],
-                 "password": self._one("SELECT password FROM accounts WHERE id=?", (item["account_id"],))["password"]}
+                 "password": self._one("SELECT password,client_id,refresh_token FROM accounts WHERE id=?", (item["account_id"],))["password"],
+                 "client_id": self._one("SELECT client_id FROM accounts WHERE id=?", (item["account_id"],))["client_id"],
+                 "refresh_token": self._one("SELECT refresh_token FROM accounts WHERE id=?", (item["account_id"],))["refresh_token"]}
                 for item in job["items"] if item["status"] in {"queued", "running"}
             ],
         }
@@ -164,9 +171,56 @@ class Database:
         stale = self.conn.execute("SELECT id,job_id FROM login_job_items WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?", (now,)).fetchall()
         with self._lock, self.conn:
             for item in stale:
-                self.conn.execute("UPDATE login_job_items SET status='retryable',error_code='worker_timeout',error_message='Worker lease expired',completed_at=? WHERE id=?", (utc_now(), item[0]))
+                self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_timeout',error_message='Worker lease expired',completed_at=? WHERE id=?", (utc_now(), item[0]))
                 self.record_log("worker_timeout", "任务租约过期", job_id=item[1], job_item_id=item[0], level="WARNING")
         return len(stale)
+
+    def mark_offline_workers(self, timeout_seconds: int = 120) -> int:
+        cutoff = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - timeout_seconds, timezone.utc).isoformat()
+        with self._lock, self.conn:
+            result = self.conn.execute("UPDATE worker_nodes SET status='offline',updated_at=? WHERE status='online' AND last_heartbeat_at < ?", (utc_now(), cutoff))
+            return result.rowcount
+
+    def pending_jobs(self) -> list[str]:
+        rows = self.conn.execute("SELECT DISTINCT job_id FROM login_job_items WHERE status IN ('queued','retryable')").fetchall()
+        return [row[0] for row in rows]
+
+    def dispatch_failed(self, job_id: str, message: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_dispatch_failed',error_message=? WHERE job_id=? AND status='running'", (message, job_id))
+            self.record_log("worker_dispatch_failed", message, job_id=job_id, level="ERROR")
+
+    def requeue_retryable(self) -> int:
+        with self._lock, self.conn:
+            result = self.conn.execute("UPDATE login_job_items SET status='queued' WHERE status='retryable' AND retry_count < max_retries")
+            return result.rowcount
+
+    def cancel_job(self, job_id: str) -> dict | None:
+        with self._lock, self.conn:
+            job = self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
+            if not job:
+                return None
+            if job["status"] in {"completed", "cancelled"}:
+                return job
+            self.conn.execute("UPDATE login_job_items SET status='cancelled',completed_at=? WHERE job_id=? AND status IN ('queued','retryable','running')", (utc_now(), job_id))
+            self.conn.execute("UPDATE login_jobs SET status='cancelled',completed_at=? WHERE id=?", (utc_now(), job_id))
+            self.record_log("job_cancelled", "任务被取消", job_id=job_id, level="WARNING")
+            return self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
+
+    def cleanup_logs(self, before: str) -> int:
+        with self._lock, self.conn:
+            return self.conn.execute("DELETE FROM execution_logs WHERE created_at < ?", (before,)).rowcount
+
+    def backup(self, destination: str | Path) -> Path:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            backup_conn = sqlite3.connect(target)
+            try:
+                self.conn.backup(backup_conn)
+            finally:
+                backup_conn.close()
+        return target
 
     def mark_job_running(self, job_id: str) -> None:
         with self._lock, self.conn:
@@ -208,6 +262,9 @@ class Database:
 
     def credential(self, account_id: int):
         return self._one("SELECT * FROM credentials WHERE account_id=?", (account_id,))
+
+    def credentials_for_check(self) -> list[dict]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM credentials WHERE status IN ('valid','unknown')")]
 
     def update_credential_check(self, account_id: int, status: str, error: str = "") -> dict:
         if status not in {"valid", "expired", "unknown"}:

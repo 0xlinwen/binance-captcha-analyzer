@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 import requests
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -19,6 +21,7 @@ WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", "")
 COOKIE_CHECK_URL = os.getenv("BINANCE_COOKIE_CHECK_URL", "https://www.binance.com/zh-CN/my/dashboard")
 LEASE_SECONDS = int(os.getenv("BINANCE_TASK_LEASE_SECONDS", "1800"))
+COOKIE_CHECK_INTERVAL = int(os.getenv("BINANCE_COOKIE_CHECK_INTERVAL", "900"))
 db = Database(DB_PATH)
 app = FastAPI(title="Binance Login Cloud API")
 
@@ -77,7 +80,34 @@ def _dispatch_worker(payload: dict) -> None:
         response = requests.post(f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/execute-login", json=payload, headers=headers, timeout=30)
         response.raise_for_status()
     except Exception as exc:
-        db.record_log("worker_dispatch_failed", str(exc), job_id=payload.get("job_id"), level="ERROR")
+        db.dispatch_failed(payload.get("job_id"), str(exc))
+
+
+def _maintenance_loop() -> None:
+    last_cookie_check = 0.0
+    while True:
+        try:
+            db.recover_expired_items()
+            db.mark_offline_workers()
+            db.requeue_retryable()
+            for job_id in db.pending_jobs():
+                if WINDOWS_WORKER_URL:
+                    payload = db.worker_payload(job_id)
+                    payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
+                    db.mark_items_running(job_id, "dispatching", LEASE_SECONDS)
+                    threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
+            if time.monotonic() - last_cookie_check >= COOKIE_CHECK_INTERVAL:
+                for credential_row in db.credentials_for_check():
+                    _check_cookie(credential_row)
+                last_cookie_check = time.monotonic()
+        except Exception as exc:
+            db.record_log("maintenance_failed", str(exc), level="ERROR")
+        time.sleep(60)
+
+
+@app.on_event("startup")
+def start_maintenance() -> None:
+    threading.Thread(target=_maintenance_loop, daemon=True, name="cloud-maintenance").start()
 
 
 @app.get("/api/login-jobs/{job_id}")
@@ -86,6 +116,28 @@ def get_job(job_id: str):
     if not job:
         raise HTTPException(404, "任务不存在")
     return job
+
+
+@app.post("/api/login-jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    value = db.cancel_job(job_id)
+    if not value:
+        raise HTTPException(404, "任务不存在")
+    return value
+
+
+@app.post("/api/database/backup")
+def backup_database():
+    target = Path(DB_PATH).with_suffix(".backup.db")
+    return {"path": str(db.backup(target))}
+
+
+@app.delete("/api/logs")
+def cleanup_logs(days: int = 30):
+    if days <= 0:
+        raise HTTPException(400, "days 必须为正整数")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    return {"deleted": db.cleanup_logs(cutoff)}
 
 
 @app.post("/api/worker/callback")
@@ -110,7 +162,14 @@ def check_cookie(account_id: int):
     value = db.credential(account_id)
     if not value:
         raise HTTPException(404, "凭证不存在")
+    return _check_cookie(value)
+
+
+def _check_cookie(value: dict):
     try:
+        expires = value.get("cookie_expires_at")
+        if expires and expires < datetime.now(timezone.utc).isoformat():
+            return db.update_credential_check(value["account_id"], "expired", "cookie_expires_at 已过期")
         response = requests.get(COOKIE_CHECK_URL, headers={"Cookie": value["cookie"]}, timeout=20, allow_redirects=False)
         if response.status_code in {401, 403} or "login" in response.headers.get("location", "").lower():
             status, error = "expired", f"HTTP {response.status_code}"
@@ -120,7 +179,7 @@ def check_cookie(account_id: int):
             status, error = "unknown", f"HTTP {response.status_code}"
     except requests.RequestException as exc:
         status, error = "unknown", str(exc)
-    return db.update_credential_check(account_id, status, error)
+    return db.update_credential_check(value["account_id"], status, error)
 
 
 @app.post("/api/workers/{worker_id}/heartbeat")
