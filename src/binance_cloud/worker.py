@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Header
 
 from binance_analyzer.config import load_config
 from binance_analyzer.orchestrator import register_account
+from .protocols import ExecuteLoginPayload
 
 
 app = FastAPI(title="Binance Login Windows Worker")
@@ -19,6 +20,7 @@ BASE_DIR = Path(os.getenv("BINANCE_WORKER_BASE_DIR", ".")).resolve()
 CONFIG = None
 LINUX_CALLBACK_URL = os.getenv("BINANCE_CALLBACK_URL", "")
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
+CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", WORKER_TOKEN)
 WORKER_ID = os.getenv("BINANCE_WORKER_ID", "windows-01")
 
 
@@ -47,20 +49,42 @@ def _config_for_task(proxy: dict) -> dict:
     return config
 
 
+def _send_callback(url: str, payload: dict, headers: dict) -> bool:
+    for attempt in range(3):
+        try:
+            requests.post(url, json=payload, headers=headers, timeout=30).raise_for_status()
+            return True
+        except requests.RequestException:
+            if attempt < 2:
+                time.sleep(2)
+    return False
+
+
 def execute(payload: dict) -> None:
     job_id = payload["job_id"]
-    task_config = _config_for_task(payload.get("proxy") or {})
     callback_url = payload.get("callback_url") or LINUX_CALLBACK_URL
     headers = {"X-Worker-Token": WORKER_TOKEN} if WORKER_TOKEN else {}
-    callback_base = callback_url.rsplit("/api/", 1)[0] if "/api/" in callback_url else ""
-    if callback_base:
-        requests.post(callback_base + f"/api/workers/{WORKER_ID}/register", json={"version": "1"}, headers=headers, timeout=20).raise_for_status()
+    callback_headers = {"X-Worker-Token": CALLBACK_TOKEN} if CALLBACK_TOKEN else {}
+    callback_base = callback_url.rsplit("/api/", 1)[0]
+    try:
+        task_config = _config_for_task(payload.get("proxy") or {})
+    except Exception as exc:
+        for account in payload["accounts"]:
+            _send_callback(callback_url, {"job_id": job_id, "job_item_id": account["job_item_id"],
+                                          "account_id": account["account_id"], "worker_id": WORKER_ID,
+                                          "status": "failed", "error_code": "worker_config_error",
+                                          "error_message": str(exc)}, callback_headers)
+        return
     for index, account in enumerate(payload["accounts"]):
         email, password = account["email"], account["password"]
         if account.get("client_id") and account.get("refresh_token") and "----" not in password:
             password = f"{password}----{account['client_id']}----{account['refresh_token']}"
         heartbeat_stop = threading.Event()
         try:
+            state_response = requests.get(callback_base + f"/api/login-jobs/{job_id}/status", headers=callback_headers, timeout=20)
+            state_response.raise_for_status()
+            if state_response.json()["status"] == "cancelled":
+                break
             heartbeat_thread = None
             if callback_base:
                 heartbeat_url = callback_base + f"/api/workers/{WORKER_ID}/heartbeat"
@@ -75,7 +99,9 @@ def execute(payload: dict) -> None:
                 heartbeat_thread.start()
             result_holder = {}
             status = register_account(BASE_DIR, email, password, task_config, worker_id=index, result_sink=result_holder.update)
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": status.value}
+            callback_status = status.value if status.value in {"success", "failed", "retryable", "proxy_failed", "rate_limited"} else "failed"
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": callback_status,
+                      "error_code": None if callback_status == "success" else status.value}
             if status.value == "success":
                 result.update({"cookie": result_holder["cookie"], "csrftoken": result_holder.get("csrftoken"),
                                "cookie_expires_at": result_holder.get("cookie_expires_at")})
@@ -84,18 +110,7 @@ def execute(payload: dict) -> None:
         finally:
             heartbeat_stop.set()
         if callback_url:
-            last_error = None
-            for _ in range(3):
-                try:
-                    response = requests.post(callback_url, json=result, headers=headers, timeout=30)
-                    response.raise_for_status()
-                    last_error = None
-                    break
-                except requests.RequestException as exc:
-                    last_error = exc
-                    time.sleep(2)
-            if last_error is not None:
-                raise last_error
+            _send_callback(callback_url, result, callback_headers)
 
 
 @app.get("/health")
@@ -113,10 +128,9 @@ def register():
 
 
 @app.post("/worker/execute-login", status_code=202)
-def execute_login(payload: dict, x_worker_token: str | None = Header(default=None)):
+def execute_login(payload: ExecuteLoginPayload, x_worker_token: str | None = Header(default=None)):
     if WORKER_TOKEN and x_worker_token != WORKER_TOKEN:
         raise HTTPException(401, "Worker token 无效")
-    if not payload.get("job_id") or not payload.get("accounts"):
-        raise HTTPException(400, "缺少 job_id 或 accounts")
-    threading.Thread(target=execute, args=(payload,), daemon=True).start()
-    return {"job_id": payload["job_id"], "status": "accepted"}
+    value = payload.model_dump()
+    threading.Thread(target=execute, args=(value,), daemon=True).start()
+    return {"job_id": payload.job_id, "status": "accepted"}

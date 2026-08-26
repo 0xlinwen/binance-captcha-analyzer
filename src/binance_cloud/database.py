@@ -135,6 +135,10 @@ class Database:
             job["items"] = [dict(r) for r in self.conn.execute("SELECT i.*, a.email FROM login_job_items i JOIN accounts a ON a.id=i.account_id WHERE job_id=? ORDER BY i.id", (job_id,))]
         return job
 
+    def job_status(self, job_id: str) -> str | None:
+        row = self.conn.execute("SELECT status FROM login_jobs WHERE id=?", (job_id,)).fetchone()
+        return row[0] if row else None
+
     def worker_payload(self, job_id: str) -> dict:
         job = self.get_job(job_id)
         if not job:
@@ -144,9 +148,8 @@ class Database:
             "proxy": {"mode": job["proxy_mode"], "address": job["proxy_address"], "max_accounts_per_job": job["max_accounts_per_proxy"]},
             "accounts": [
                 {"job_item_id": item["id"], "account_id": item["account_id"], "email": item["email"],
-                 "password": self._one("SELECT password,client_id,refresh_token FROM accounts WHERE id=?", (item["account_id"],))["password"],
-                 "client_id": self._one("SELECT client_id FROM accounts WHERE id=?", (item["account_id"],))["client_id"],
-                 "refresh_token": self._one("SELECT refresh_token FROM accounts WHERE id=?", (item["account_id"],))["refresh_token"]}
+                 **{key: self._one("SELECT password,client_id,refresh_token FROM accounts WHERE id=?", (item["account_id"],))[key]
+                    for key in ("password", "client_id", "refresh_token")}}
                 for item in job["items"] if item["status"] in {"queued", "running"}
             ],
         }
@@ -157,6 +160,29 @@ class Database:
         with self._lock, self.conn:
             self.conn.execute("UPDATE login_job_items SET status='running', worker_id=?, started_at=COALESCE(started_at, ?), lease_expires_at=? WHERE job_id=? AND status='queued'", (worker_id, now, lease, job_id))
             self.record_log("items_claimed", f"worker={worker_id}", job_id=job_id, worker_id=worker_id)
+
+    def renew_lease(self, job_item_id: int, worker_id: str, lease_seconds: int) -> None:
+        lease = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + lease_seconds, timezone.utc).isoformat()
+        with self._lock, self.conn:
+            updated = self.conn.execute(
+                "UPDATE login_job_items SET worker_id=?, lease_expires_at=? WHERE id=? AND status='running' AND worker_id IN (?, 'dispatching')",
+                (worker_id, lease, job_item_id, worker_id),
+            ).rowcount
+            if not updated:
+                raise ValueError("任务明细不属于当前 Worker")
+
+    def _refresh_job_state(self, job_id: str, now: str | None = None) -> None:
+        counts = self.conn.execute(
+            "SELECT SUM(status='success'), SUM(status IN ('failed','cancelled','proxy_quota_exceeded')), COUNT(*) "
+            "FROM login_job_items WHERE job_id=?", (job_id,)
+        ).fetchone()
+        success, failed, total = counts[0] or 0, counts[1] or 0, counts[2]
+        done = success + failed
+        completed = now if done == total else None
+        self.conn.execute(
+            "UPDATE login_jobs SET success_count=?,failed_count=?,status=?,completed_at=CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END WHERE id=?",
+            (success, failed, "completed" if done == total else "running", completed, completed, job_id),
+        )
 
     def register_worker(self, worker_id: str, name: str = "", version: str = "") -> dict:
         now = utc_now()
@@ -176,8 +202,9 @@ class Database:
         stale = self.conn.execute("SELECT id,job_id FROM login_job_items WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?", (now,)).fetchall()
         with self._lock, self.conn:
             for item in stale:
-                self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_timeout',error_message='Worker lease expired',completed_at=? WHERE id=?", (utc_now(), item[0]))
+                self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count + 1 < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_timeout',error_message='Worker lease expired',completed_at=? WHERE id=?", (utc_now(), item[0]))
                 self.record_log("worker_timeout", "任务租约过期", job_id=item[1], job_item_id=item[0], level="WARNING")
+                self._refresh_job_state(item[1], utc_now())
         return len(stale)
 
     def mark_offline_workers(self, timeout_seconds: int = 120) -> int:
@@ -192,8 +219,9 @@ class Database:
 
     def dispatch_failed(self, job_id: str, message: str) -> None:
         with self._lock, self.conn:
-            self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_dispatch_failed',error_message=? WHERE job_id=? AND status='running'", (message, job_id))
+            self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count + 1 < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_dispatch_failed',error_message=? WHERE job_id=? AND status='running'", (message, job_id))
             self.record_log("worker_dispatch_failed", message, job_id=job_id, level="ERROR")
+            self._refresh_job_state(job_id, utc_now())
 
     def requeue_retryable(self) -> int:
         with self._lock, self.conn:
@@ -242,13 +270,15 @@ class Database:
             item = self._one("SELECT * FROM login_job_items WHERE id=?", (item_id,))
             if not item:
                 raise ValueError("找不到任务明细")
-            if item["status"] in {"success", "failed", "proxy_quota_exceeded"}:
+            if item["status"] in {"success", "failed", "cancelled", "proxy_quota_exceeded"}:
                 return item
             if status not in {"success", "failed", "retryable", "proxy_failed", "rate_limited"}:
                 raise ValueError(f"不支持的回调状态: {status}")
             if status == "success" and not payload.get("cookie"):
                 raise ValueError("成功回调必须包含 cookie")
             now = utc_now()
+            if payload.get("account_id") != item["account_id"] or payload.get("job_id") != item["job_id"]:
+                raise ValueError("回调任务明细不匹配")
             stored_status = "failed" if status in {"proxy_failed", "rate_limited"} else status
             self.conn.execute("UPDATE login_job_items SET status=?, error_code=?, error_message=?, completed_at=?, lease_expires_at=NULL WHERE id=?",
                               (stored_status, payload.get("error_code"), payload.get("error_message"), now, item_id))
@@ -261,10 +291,7 @@ class Database:
                 self.conn.execute("""UPDATE login_job_proxy_usage SET success_count=success_count+?,failed_count=failed_count+?,last_assigned_at=? WHERE job_id=? AND proxy_address=?""",
                     (1 if status == "success" else 0, 0 if status == "success" else 1, now, item["job_id"], item["proxy_address"]))
             self.record_log("callback_received", f"status={status}", job_id=item["job_id"], job_item_id=item_id, account_id=item["account_id"], worker_id=payload.get("worker_id"))
-            counts = self.conn.execute("SELECT SUM(status='success'), SUM(status NOT IN ('queued','running','retryable')), COUNT(*) FROM login_job_items WHERE job_id=?", (item["job_id"],)).fetchone()
-            done = (counts[0] or 0) + (counts[1] or 0)
-            self.conn.execute("UPDATE login_jobs SET success_count=?,failed_count=?,status=?,completed_at=CASE WHEN ?=total_count THEN ? ELSE completed_at END WHERE id=?",
-                              (counts[0] or 0, counts[1] or 0, "completed" if done == counts[2] else "running", done, now if done == counts[2] else None, item["job_id"]))
+            self._refresh_job_state(item["job_id"], now)
             return self._one("SELECT * FROM login_job_items WHERE id=?", (item_id,))
 
     def credential(self, account_id: int):

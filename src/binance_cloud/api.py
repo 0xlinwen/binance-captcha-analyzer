@@ -13,6 +13,7 @@ from fastapi import Header
 from pydantic import BaseModel, Field
 
 from .database import Database
+from .protocols import CallbackPayload
 
 
 DB_PATH = os.getenv("BINANCE_CLOUD_DB", "data/binance.db")
@@ -60,6 +61,8 @@ def save_account(account: AccountIn):
 @app.post("/api/login-jobs")
 def create_job(request: JobIn):
     try:
+        if not WINDOWS_WORKER_URL or not os.getenv("BINANCE_CALLBACK_URL"):
+            raise ValueError("必须配置 BINANCE_WINDOWS_WORKER_URL 和 BINANCE_CALLBACK_URL")
         job = db.create_job([a.model_dump() for a in request.accounts], request.proxy.model_dump())
         db.mark_job_running(job["id"])
         if WINDOWS_WORKER_URL:
@@ -111,6 +114,14 @@ def get_job(job_id: str):
     return job
 
 
+@app.get("/api/login-jobs/{job_id}/status")
+def job_status(job_id: str):
+    status = db.job_status(job_id)
+    if not status:
+        raise HTTPException(404, "任务不存在")
+    return {"job_id": job_id, "status": status}
+
+
 @app.post("/api/login-jobs/{job_id}/cancel")
 def cancel_job(job_id: str):
     value = db.cancel_job(job_id)
@@ -134,10 +145,10 @@ def cleanup_logs(days: int = 30):
 
 
 @app.post("/api/worker/callback")
-def callback(payload: dict, x_worker_token: str | None = Header(default=None)):
+def callback(payload: CallbackPayload, x_worker_token: str | None = Header(default=None)):
     _auth(x_worker_token, CALLBACK_TOKEN or WORKER_TOKEN, "Worker")
     try:
-        return db.save_callback(payload)
+        return db.save_callback(payload.model_dump())
     except (KeyError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -153,6 +164,8 @@ def credential(account_id: int):
 @app.post("/api/accounts/{account_id}/relogin")
 def relogin(account_id: int, proxy: ProxyIn = ProxyIn()):
     try:
+        if not WINDOWS_WORKER_URL or not os.getenv("BINANCE_CALLBACK_URL"):
+            raise ValueError("必须配置 BINANCE_WINDOWS_WORKER_URL 和 BINANCE_CALLBACK_URL")
         job = db.create_relogin_job(account_id, proxy.model_dump())
         db.mark_job_running(job["id"])
         if WINDOWS_WORKER_URL:
@@ -169,7 +182,11 @@ def relogin(account_id: int, proxy: ProxyIn = ProxyIn()):
 def worker_heartbeat(worker_id: str, payload: dict | None = None, x_worker_token: str | None = Header(default=None)):
     _auth(x_worker_token, WORKER_TOKEN, "Worker")
     payload = payload or {}
-    return db.heartbeat(worker_id, payload.get("current_job_item_id"))
+    item_id = payload.get("current_job_item_id")
+    result = db.heartbeat(worker_id, item_id)
+    if item_id is not None:
+        db.renew_lease(item_id, worker_id, LEASE_SECONDS)
+    return result
 
 
 @app.post("/api/workers/{worker_id}/register")
