@@ -16,6 +16,7 @@
 - 最近完成：新增 `src/binance_cloud/` 实验性 SQLite 云端 API 与 Windows Worker 入口；Linux 创建登录任务并异步 POST 给 Windows，Windows 复用 `register_account`，每个账号完成后回调 Linux；Cookie 额外记录 `cookie_expires_at`，SQLite 长字段使用 `TEXT`。
 - 最近完成：云端服务增加 Worker/回调 Token 鉴权、Worker 注册与执行心跳、任务租约超时回收、Cookie 在线检查接口、固定代理任务计数和回调重试；新增 2 项 SQLite 服务测试。
 - 最近完成：继续增加云端维护循环（过期租约回收、Worker offline、retryable 自动重派）、Cookie 周期检查、任务取消/数据库备份/日志清理接口、SQLite WAL 和部署模板；Worker 任务已传递 `client_id`/`refresh_token`，Cookie 过期时间统一为 UTC ISO 字符串。
+- 最近完成：成功回调缺少 Cookie 时拒绝；新增 `/api/accounts/{id}/relogin` 重新登录入口；全量测试仍为 151 项通过。
 
 ## 架构约定
 
