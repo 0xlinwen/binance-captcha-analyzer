@@ -96,11 +96,18 @@ class Database:
         with self._lock, self.conn:
             self.conn.execute("INSERT INTO login_jobs(id,status,proxy_mode,proxy_address,max_accounts_per_proxy,total_count,created_at) VALUES(?,?,?,?,?,?,?)",
                               (job_id, "submitted", mode, address, limit, len(accounts), now))
-            for account in accounts:
+            quota_exceeded = 0
+            for index, account in enumerate(accounts):
                 self.conn.execute("INSERT OR IGNORE INTO accounts(email,password,created_at,updated_at) VALUES(?,?,?,?)",
                                   (account["email"], account["password"], now, now))
                 row = self._one("SELECT id FROM accounts WHERE email=?", (account["email"],))
-                self.conn.execute("INSERT INTO login_job_items(job_id,account_id,status) VALUES(?,?, 'queued')", (job_id, row["id"]))
+                item_status = "queued"
+                if mode == "fixed" and index >= limit:
+                    item_status = "proxy_quota_exceeded"
+                    quota_exceeded += 1
+                self.conn.execute("INSERT INTO login_job_items(job_id,account_id,status) VALUES(?,?,?)", (job_id, row["id"], item_status))
+            if quota_exceeded:
+                self.conn.execute("UPDATE login_jobs SET failed_count=? WHERE id=?", (quota_exceeded, job_id))
         return self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
 
     def get_job(self, job_id: str):
@@ -148,7 +155,7 @@ class Database:
                     VALUES(?,?,?,?,?,'valid',?,?) ON CONFLICT(account_id) DO UPDATE SET cookie=excluded.cookie,csrftoken=excluded.csrftoken,
                     cookie_expires_at=excluded.cookie_expires_at,last_verified_at=excluded.last_verified_at,status='valid',updated_at=excluded.updated_at""",
                     (item["account_id"], payload["cookie"], payload.get("csrftoken"), payload.get("cookie_expires_at"), now, now, now))
-            counts = self.conn.execute("SELECT SUM(status='success'), SUM(status IN ('failed','proxy_quota_exceeded')), COUNT(*) FROM login_job_items WHERE job_id=?", (item["job_id"],)).fetchone()
+            counts = self.conn.execute("SELECT SUM(status='success'), SUM(status NOT IN ('queued','running')), COUNT(*) FROM login_job_items WHERE job_id=?", (item["job_id"],)).fetchone()
             done = (counts[0] or 0) + (counts[1] or 0)
             self.conn.execute("UPDATE login_jobs SET success_count=?,failed_count=?,status=?,completed_at=CASE WHEN ?=total_count THEN ? ELSE completed_at END WHERE id=?",
                               (counts[0] or 0, counts[1] or 0, "completed" if done == counts[2] else "running", done, now if done == counts[2] else None, item["job_id"]))
