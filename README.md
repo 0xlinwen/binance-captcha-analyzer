@@ -105,6 +105,25 @@ output/
 
 ## 安装
 
+### 云端 API 与 Windows Worker（实验性服务入口）
+
+Linux 云端启动 API：
+
+```bash
+PYTHONPATH=src BINANCE_CLOUD_DB=data/binance.db BINANCE_WINDOWS_WORKER_URL=https://windows.example.com \
+  uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
+```
+
+Windows 启动执行服务（需在 Worker 目录准备 `config.json`）：
+
+```powershell
+$env:BINANCE_WORKER_BASE_DIR = "C:\\binance-worker"
+$env:BINANCE_CALLBACK_URL = "https://linux.example.com/api/worker/callback"
+python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
+```
+
+接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 登录流程。
+
 ### Windows PowerShell
 
 ```powershell
