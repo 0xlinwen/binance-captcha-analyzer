@@ -31,12 +31,13 @@ def classify_auth_response(url: str, body_text: str, status_code: int) -> Cookie
     return CookieCheckResult("unknown", url, f"响应未呈现明确状态 HTTP {status_code}")
 
 
-def check_creator_center_cookie(cookie: str, *, timeout: int = 20, url: str = AUTH_CHECK_URL) -> CookieCheckResult:
+def check_creator_center_cookie(cookie: str, *, timeout: int = 20, url: str = AUTH_CHECK_URL, proxy: str | None = None) -> CookieCheckResult:
     if not isinstance(cookie, str) or not cookie.strip():
         raise ValueError("Cookie 不能为空")
     session = requests.Session()
-    session.trust_env = False
-    session.proxies.clear()
+    # 默认继承 requests 的 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY；传入 proxy 时覆盖为指定代理。
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
     try:
         response = session.post(
             url,
