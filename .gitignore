@@ -25,5 +25,7 @@ debug_artifacts/
 
 # Sensitive files
 config.json
+config/*.json
+!config/*.example.json
 accounts.txt
 logs/

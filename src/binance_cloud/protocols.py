@@ -4,9 +4,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-PROTOCOL_VERSION = "1"
-
-
 class CallbackPayload(BaseModel):
     job_id: str
     job_item_id: int
@@ -31,7 +28,7 @@ class WorkerAccount(BaseModel):
 
 
 class ExecuteLoginPayload(BaseModel):
-    protocol_version: str = PROTOCOL_VERSION
+    protocol_version: str
     job_id: str
     mode: Literal["login", "register"]
     callback_url: str

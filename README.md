@@ -126,44 +126,37 @@ python -m pip install -r requirements-server.txt
 Linux 云端启动 API：
 
 ```bash
-PYTHONPATH=src BINANCE_CLOUD_DB=data/binance.db \
-BINANCE_WINDOWS_WORKER_URL=https://windows.example.com \
-BINANCE_CALLBACK_URL=https://linux.example.com/api/worker/callback \
-  uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
+PYTHONPATH=src uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
 ```
 
-Linux 至少需要设置 `BINANCE_CLOUD_DB`、`BINANCE_WINDOWS_WORKER_URL` 和
-`BINANCE_CALLBACK_URL`（后者用于创建任务时传给 Worker）。可选运行参数：
-`BINANCE_TASK_LEASE_SECONDS`（默认 1800 秒）、`BINANCE_WORKER_TOKEN`、
-`BINANCE_CALLBACK_TOKEN`。数据库父目录需由运行用户具备写权限。
+Linux 的业务配置统一写在 `config/cloud.json`（数据库路径、Windows Worker 地址、回调地址、协议版本、租约时长和 Lark Webhook）。数据库父目录需由运行用户具备写权限。鉴权仍可按需通过 `BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN` 启用。
 
-Windows 启动执行服务（需在 Worker 目录准备 `config.json`）：
+Windows 启动执行服务（需在 Worker 目录准备 `config/automation.json` 和 `config/worker.json`）：
 
 ```powershell
 $env:BINANCE_WORKER_BASE_DIR = "C:\\binance-worker"
-$env:BINANCE_CALLBACK_URL = "https://linux.example.com/api/worker/callback"
 python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
 ```
 
 本地直接调试 Worker、暂时没有 Linux 任务状态接口时，可在 Windows 的
-`config.json` 中设置 `"debug_mode": true`。调试模式会跳过任务状态查询和心跳，
-但仍会执行登录/注册；如果配置了 `BINANCE_CALLBACK_URL`，执行结果仍会回调。
+`config/worker.json` 中设置 `"debug_mode": true`。调试模式会跳过任务状态查询和心跳，
+但仍会执行登录/注册；如果 `config/worker.json` 配置了 `callback_url`，执行结果仍会回调。
 生产环境请保持 `debug_mode` 为 `false`，以启用取消检查和租约心跳。
 
 Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
 `playwright install chromium`；`BINANCE_WORKER_BASE_DIR` 必须指向包含
-`config.json`、账号/输出目录的 Worker 工作目录。若 Linux 启用了
+`config/automation.json`、账号/输出目录的 Worker 工作目录。若 Linux 启用了
 `BINANCE_WORKER_TOKEN`，Windows 端也必须设置同名变量；回调鉴权可另设
 `BINANCE_CALLBACK_TOKEN`。
 
-Windows `config.json` 可设置 `worker_max_workers` 控制同一任务内的账号并发数，
+Windows `config/worker.json` 可设置 `worker_max_workers` 控制同一任务内的账号并发数，
 例如 `2` 表示该 Windows Worker 全部任务最多同时执行两个账号，其余账号排队；默认值为 `1`（串行）。
 Linux 每次派发前会检查 Windows `/health` 的 `protocol_version`，并在任务请求中携带相同版本；版本不一致时任务不执行并记录为派发失败。Linux 与 Windows 必须部署同一版本代码。
-版本不兼容时，如果 `config.json` 配置了 `lark.webhook_url`，Linux 会发送一次系统告警；未配置时不发送外部通知，但错误会写入任务状态和执行日志，任务仍按重试策略处理。
+版本不兼容时，如果 Linux `config/cloud.json` 配置了 `lark.webhook_url`，Linux 会发送一次系统告警；未配置时不发送外部通知，但错误会写入任务状态和执行日志，任务仍按重试策略处理。
 
 接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。请求体的 `mode` 可选 `login` 或 `register`，同一 Worker 可并行处理两种独立流程；当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 流程。
 
-当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须配置 `BINANCE_WINDOWS_WORKER_URL` 与 `BINANCE_CALLBACK_URL`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
+当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须在 `config/cloud.json` 配置 `windows_worker_url` 与 `callback_url`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
 
 Windows 在回调前会把结果写入 `output/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_updated_at`，Linux 只接受较新的凭证，避免 Cookie 过期重登后旧回调迟到并覆盖新 Cookie。
 
@@ -200,10 +193,14 @@ playwright install chromium
 
 ## 配置
 
-复制 `config.example.json` 为 `config.json`，按需修改：
+复制角色化示例为对应的 JSON 配置，按需修改。根目录 `config.json` 可暂时保留作迁移核对，但本地 CLI 和 Windows Worker 都不会读取它：
 
 ```bash
-cp config.example.json config.json
+cp config/automation.example.json config/automation.json
+# Windows Worker 额外需要
+cp config/worker.example.json config/worker.json
+# Linux Cloud 额外需要
+cp config/cloud.example.json config/cloud.json
 ```
 
 ### 配置项说明
@@ -221,7 +218,6 @@ cp config.example.json config.json
   // === 模式 ===
   "mode": "login",                         // 运行模式：login / register
   "max_login_retries": 3,                  // 单账号最大重试次数
-  "debug_mode": false,                     // 调试模式
 
   // === 浏览器 ===
   "headless": false,                       // 是否无头模式
@@ -338,7 +334,7 @@ PYTHONPATH=src python -m binance_cloud.batch_submit \
 ```
 
 命令会读取账号文件（支持 `email:password` 和 `email----password`），按批次调用
-`POST /api/login-jobs` 并轮询任务结果。Linux 项目根目录 `config.json` 中配置：
+`POST /api/login-jobs` 并轮询任务结果。Linux 的 `config/cloud.json` 中配置：
 
 ```json
 {
@@ -365,7 +361,7 @@ python main.py --refresh-cache
 
 ### AI 请求代理
 
-`ai_proxy` 只用于 OpenRouter 验证码识别请求，不影响浏览器访问 Binance 的出口 IP。`config.example.json` 默认关闭该能力；如果需要代理 OpenRouter，请把 `ai_proxy.enabled` 改为 `true` 并填入真实代理。
+`ai_proxy` 只用于 OpenRouter 验证码识别请求，不影响浏览器访问 Binance 的出口 IP。配置示例默认关闭该能力；如果需要代理 OpenRouter，请把 `config/automation.json` 的 `ai_proxy.enabled` 改为 `true` 并填入真实代理。
 
 ### 代理模式
 

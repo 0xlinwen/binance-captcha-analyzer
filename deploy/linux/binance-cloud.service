@@ -6,7 +6,6 @@ After=network-online.target
 Type=simple
 WorkingDirectory=/opt/binance-captcha-analyzer
 Environment=PYTHONPATH=/opt/binance-captcha-analyzer/src
-Environment=BINANCE_CLOUD_DB=/var/lib/binance-cloud/binance.db
 EnvironmentFile=/etc/binance-cloud.env
 ExecStart=/opt/binance-captcha-analyzer/.venv/bin/uvicorn binance_cloud.api:app --host 127.0.0.1 --port 8000
 Restart=always

@@ -44,10 +44,23 @@ def _write_config(base_dir: Path, **overrides):
         },
     }
     config.update(overrides)
-    (base_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    config_dir = base_dir / "config"
+    config_dir.mkdir()
+    (config_dir / "automation.json").write_text(json.dumps(config), encoding="utf-8")
 
 
 class ConfigTests(unittest.TestCase):
+    def test_load_config_uses_automation_config_not_root_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir)
+            (base_dir / "config.json").write_text("not json", encoding="utf-8")
+
+            config = load_config(base_dir)
+
+            self.assertEqual(config["imap_host"], "imap.example.com")
+            self.assertNotIn("debug_mode", config)
+
     def test_load_config_rejects_removed_captcha_cooldown_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
@@ -148,7 +161,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             _write_config(base_dir)
-            config_path = base_dir / "config.json"
+            config_path = base_dir / "config" / "automation.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config.pop("mode")
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -160,7 +173,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             _write_config(base_dir)
-            config_path = base_dir / "config.json"
+            config_path = base_dir / "config" / "automation.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config["runtime"].pop("max_workers_default")
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -172,7 +185,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             _write_config(base_dir)
-            config_path = base_dir / "config.json"
+            config_path = base_dir / "config" / "automation.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config.pop("headless")
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -184,7 +197,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             _write_config(base_dir)
-            config_path = base_dir / "config.json"
+            config_path = base_dir / "config" / "automation.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config.pop("max_login_retries")
             config_path.write_text(json.dumps(config), encoding="utf-8")
