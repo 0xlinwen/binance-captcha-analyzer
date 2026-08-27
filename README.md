@@ -73,7 +73,7 @@ Windows Worker（src/binance_cloud/worker.py）
         ▼
 Linux Cloud API ────────────────────────────────► SQLite 凭证和任务结果
         │                                            credentials / execution_logs
-        └── 任务组连续 5 次失败、全部完成 ───────► Lark Webhook（可选）
+        └── 任务组连续失败达到阈值、全部完成 ─────► Lark Webhook（可选）
 ```
 
 凭证只由 Linux SQLite 对外提供；Windows 保存的是自动化运行文件、回调重试队列和本地调试结果。每台机器的相对路径都以各自项目根目录为基准。
@@ -312,6 +312,7 @@ Linux 派发的任务会在请求中携带 `cloud.json.callback_url`，因此生
   "windows_worker_url": "http://Windows公网IP:8100", // Linux 能访问的 Worker 地址
   "callback_url": "https://Linux域名/api/worker/callback", // Windows 能访问的 Linux 回调地址
   "task_lease_seconds": 1800, // Worker 心跳租约秒数
+  "consecutive_failure_limit": 5, // 任务组连续失败多少个账号后停止
   "lark": {"webhook_url": ""} // 可选：全局任务告警和完成通知
 }
 ```
@@ -460,7 +461,7 @@ PYTHONPATH=src python -m binance_cloud.batch_submit \
 }
 ```
 
-全局任务连续 5 个失败只发送一次告警，全部账号完成只发送一次汇总通知；单账号任务不发送通知。通知由 Linux API 统一发送，Webhook 不从命令行传入。
+任务组连续失败达到 `config/cloud.json` 的 `consecutive_failure_limit` 后，Linux 会取消该任务组所有尚未完成的账号并发送一次 Lark 告警；已经开始执行的账号会在当前流程结束后回调，后续账号不再启动。任务和任务组分别记录 `success_count`、`failed_count`、`cancelled_count`，取消账号还会写入单独的 `account_cancelled` 执行日志。全部账号完成只发送一次汇总通知；单账号任务不发送通知。通知由 Linux API 统一发送，Webhook 不从命令行传入。
 `--timeout-seconds` 是批量客户端的整体等待上限，超时后命令退出，但 Linux 中已创建的任务继续运行。接口请求可提供 `idempotency_key`，同一键重复提交会返回原任务，不重复创建账号任务。
 
 ```bash

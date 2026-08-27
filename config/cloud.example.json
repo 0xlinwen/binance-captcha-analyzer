@@ -4,5 +4,6 @@
   "windows_worker_url": "http://windows.example.com:8100",
   "callback_url": "https://linux.example.com/api/worker/callback",
   "task_lease_seconds": 1800,
+  "consecutive_failure_limit": 5,
   "lark": {"webhook_url": ""}
 }
