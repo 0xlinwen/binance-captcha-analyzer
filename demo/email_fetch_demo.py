@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OAuth + IMAP demo.
 
-accounts.txt line:
+data/accounts/pending.txt line:
   email----password----client_id----refresh_token
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib import error, parse, request
 
 
-ACCOUNTS_FILE = Path(os.getenv("ACCOUNTS_FILE", "accounts.txt"))
+ACCOUNTS_FILE = Path(os.getenv("ACCOUNTS_FILE", "data/accounts/pending.txt"))
 IMAP_HOST = "outlook.office365.com"
 IMAP_PORT = 993
 TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"

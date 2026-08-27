@@ -10,18 +10,18 @@ from pathlib import Path
 from .file_lock import lock, unlock
 
 
-STATE_FILE = ".creator_api_quota.json"
+STATE_FILE = "data/runtime/creator_api_quota.json"
 
 
-def _path(base_dir: Path, output_file: str) -> Path:
-    return base_dir / Path(output_file).parent / STATE_FILE
+def _path(base_dir: Path) -> Path:
+    return base_dir / STATE_FILE
 
 
 def initialize_creator_api_quota(base_dir: Path, config: dict) -> None:
     creator = config["creator_api"]
     if not creator["enabled"]:
         return
-    path = _path(base_dir, config["output_file"])
+    path = _path(base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"completed": 0, "active": []}), encoding="utf-8")
 
@@ -51,7 +51,7 @@ def acquire_creator_api_slot(base_dir: Path, config: dict) -> str | None:
     creator = config["creator_api"]
     max_accounts = creator["max_accounts"]
     deadline = time.monotonic() + creator["slot_wait_timeout_sec"]
-    path = _path(base_dir, config["output_file"])
+    path = _path(base_dir)
     token = uuid.uuid4().hex
     while True:
         lock_file = _lock(path)
@@ -72,7 +72,7 @@ def acquire_creator_api_slot(base_dir: Path, config: dict) -> str | None:
 
 
 def release_creator_api_slot(base_dir: Path, config: dict, token: str, *, completed: bool) -> None:
-    path = _path(base_dir, config["output_file"])
+    path = _path(base_dir)
     lock_file = _lock(path)
     try:
         state = _read(path)

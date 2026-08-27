@@ -14,7 +14,7 @@ from binance_analyzer.creator_api_quota import (
 class CreatorApiQuotaTests(unittest.TestCase):
     def test_failed_extraction_releases_slot_for_next_success(self) -> None:
         config = {
-            "output_file": "output/registered_accounts.json",
+            "output_file": "data/results/registered_accounts.json",
             "creator_api": {"enabled": True, "max_accounts": 1, "slot_wait_timeout_sec": 1},
         }
         with tempfile.TemporaryDirectory() as tmpdir:

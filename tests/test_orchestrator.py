@@ -38,7 +38,7 @@ class OrchestratorProxyIpTests(unittest.TestCase):
     def test_record_used_proxy_ip_writes_configured_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
-            proxy_config = {"used_ips_file": "output/used_proxy_ips.txt"}
+            proxy_config = {"used_ips_file": "data/runtime/used_proxy_ips.txt"}
 
             appended = _record_used_proxy_ip(
                 base_dir,
@@ -49,14 +49,14 @@ class OrchestratorProxyIpTests(unittest.TestCase):
 
             self.assertTrue(appended)
             self.assertEqual(
-                (base_dir / "output" / "used_proxy_ips.txt").read_text(encoding="utf-8"),
+                (base_dir / "data" / "runtime" / "used_proxy_ips.txt").read_text(encoding="utf-8"),
                 "8.8.8.8\n",
             )
 
     def test_record_used_proxy_ip_deduplicates_existing_ip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
-            proxy_config = {"used_ips_file": "output/used_proxy_ips.txt"}
+            proxy_config = {"used_ips_file": "data/runtime/used_proxy_ips.txt"}
 
             first = _record_used_proxy_ip(base_dir, proxy_config, {"exit_ip": "8.8.8.8"}, worker_id=0)
             second = _record_used_proxy_ip(base_dir, proxy_config, {"exit_ip": "8.8.8.8"}, worker_id=0)
@@ -64,7 +64,7 @@ class OrchestratorProxyIpTests(unittest.TestCase):
             self.assertTrue(first)
             self.assertFalse(second)
             self.assertEqual(
-                (base_dir / "output" / "used_proxy_ips.txt").read_text(encoding="utf-8"),
+                (base_dir / "data" / "runtime" / "used_proxy_ips.txt").read_text(encoding="utf-8"),
                 "8.8.8.8\n",
             )
 
@@ -76,7 +76,7 @@ class OrchestratorProxyIpTests(unittest.TestCase):
                     "alice@example.com",
                     "pass1",
                     {
-                        "output_file": "output/registered_accounts.json",
+                        "output_file": "data/results/registered_accounts.json",
                         "mode": "unknown",
                         "proxy": {"enabled": False},
                     },
@@ -110,12 +110,12 @@ class OrchestratorProxyIpTests(unittest.TestCase):
             "alice@example.com",
             "pass1",
             {
-                "output_file": "output/registered_accounts.json",
+                "output_file": "data/results/registered_accounts.json",
                 "mode": "login",
                 "proxy": {
                     "enabled": True,
                     "mode": "dynamic",
-                    "used_ips_file": "output/used_proxy_ips.txt",
+                    "used_ips_file": "data/runtime/used_proxy_ips.txt",
                     "max_attempts": 1,
                 },
             },

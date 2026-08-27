@@ -101,14 +101,20 @@ src/binance_cloud/
   database.py                          # SQLite 任务、凭证、日志持久化
   worker.py                            # Windows 执行 Worker
   protocols.py                         # 云端/Worker 请求协议
-output/
-  success_accounts.txt                 # 成功的账号
-  failed_accounts.txt                  # 失败的账号
-  registered_accounts.json             # 成功账号的完整凭据、Cookie 和 CSRF Token
-  logs/
-    binance_YYYY-MM-DD.log             # 每日主日志
-    success/YYYY-MM-DD.log             # 当日成功账号列表
-    failure/YYYY-MM-DD.log             # 当日失败账号列表
+data/
+  accounts/pending.txt                 # 待处理账号队列
+  results/
+    success_accounts.txt               # 成功账号简表
+    failed_accounts.txt                # 失败账号简表
+    registered_accounts.json           # 完整凭据、Cookie 和 CSRF Token
+  runtime/
+    used_proxy_ips.txt                 # 已使用动态代理出口 IP
+    creator_api_quota.json             # Creator API 提取配额状态
+    callback_outbox.json               # Windows 回调重试队列
+artifacts/
+  debug/creator_api/                   # Creator API 提取失败证据
+logs/
+  failures/                            # 失败账号详细日志
 ```
 
 ## 安装
@@ -158,7 +164,7 @@ Linux 每次派发前会检查 Windows `/health` 的 `protocol_version`，并在
 
 当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须在 `config/cloud.json` 配置 `windows_worker_url` 与 `callback_url`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
 
-Windows 在回调前会把结果写入 `output/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_updated_at`，Linux 只接受较新的凭证，避免 Cookie 过期重登后旧回调迟到并覆盖新 Cookie。
+Windows 在回调前会把结果写入 `data/runtime/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_updated_at`，Linux 只接受较新的凭证，避免 Cookie 过期重登后旧回调迟到并覆盖新 Cookie。
 
 附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
 
@@ -212,11 +218,12 @@ cp config/cloud.example.json config/cloud.json
   "models": ["google/gemini-3-flash-preview"],  // AI 模型列表，取第一个
   "imap_host": "imap.example.com",         // 邮箱 IMAP 服务器
   "imap_port": 993,                        // IMAP 端口
-  "accounts_file": "accounts.txt",         // 账号文件路径
-  "output_file": "output/registered_accounts.json",  // 输出文件路径
+  "accounts_file": "data/accounts/pending.txt",      // 账号文件路径
+  "output_file": "data/results/registered_accounts.json", // 输出文件路径
 
   // === 模式 ===
   "mode": "login",                         // 运行模式：login / register
+  "mode_options": ["login", "register"],   // 仅供手动复制，不参与程序读取
   "max_login_retries": 3,                  // 单账号最大重试次数
 
   // === 浏览器 ===
@@ -240,7 +247,7 @@ cp config/cloud.example.json config/cloud.json
   // === 代理 ===
   "proxy": {
     "enabled": false,
-    "used_ips_file": "output/used_proxy_ips.txt",
+    "used_ips_file": "data/runtime/used_proxy_ips.txt",
     "mode": "dynamic",                     // dynamic / static
     "api_url": "https://proxy-api.example.com/gen?region=JP&count=1&proto=http",  // 动态 IP API
     "timeout_seconds": 15,
@@ -306,7 +313,7 @@ cp config/cloud.example.json config/cloud.json
 
 ### 账号文件格式
 
-`accounts.txt`，每行一个账号，支持三种格式：
+`data/accounts/pending.txt`，每行一个账号，支持三种格式：
 
 ```
 email1@example.com:password1
@@ -325,7 +332,7 @@ email4@outlook.com----password4----client_id----refresh_token
 
 ```bash
 PYTHONPATH=src python -m binance_cloud.batch_submit \
-  --file accounts.txt \
+  --file data/accounts/pending.txt \
   --cloud-url http://Linux公网IP:8000 \
   --mode login \
   --batch-size 20 \
@@ -783,12 +790,9 @@ email@outlook.com----login_password----client_id----refresh_token
 ## 日志系统
 
 ```
-output/logs/
-  binance_YYYY-MM-DD.log               # 每日主日志（完整执行过程）
-  success/
-    YYYY-MM-DD.log                      # 当日成功账号列表（含 already_registered）
-  failure/
-    YYYY-MM-DD.log                      # 当日失败账号列表
+logs/
+  failures/
+    {账号}_{时间}.log                    # 失败账号的详细流程日志
 ```
 
 运行结束后自动输出当日汇总统计（总数、成功、失败、IP风控、成功率）。

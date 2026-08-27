@@ -70,22 +70,22 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
 
-            first_append = append_used_proxy_ip(base_dir, "output/used_proxy_ips.txt", "1.1.1.1")
-            second_append = append_used_proxy_ip(base_dir, "output/used_proxy_ips.txt", "1.1.1.1")
-            third_append = append_used_proxy_ip(base_dir, "output/used_proxy_ips.txt", "2.2.2.2")
+            first_append = append_used_proxy_ip(base_dir, "data/runtime/used_proxy_ips.txt", "1.1.1.1")
+            second_append = append_used_proxy_ip(base_dir, "data/runtime/used_proxy_ips.txt", "1.1.1.1")
+            third_append = append_used_proxy_ip(base_dir, "data/runtime/used_proxy_ips.txt", "2.2.2.2")
 
             self.assertTrue(first_append)
             self.assertFalse(second_append)
             self.assertTrue(third_append)
             self.assertEqual(
-                load_used_proxy_ips(base_dir, "output/used_proxy_ips.txt"),
+                load_used_proxy_ips(base_dir, "data/runtime/used_proxy_ips.txt"),
                 {"1.1.1.1", "2.2.2.2"},
             )
 
     def test_save_registered_account_matches_email_password_identity_and_updates_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
-            output_path = base_dir / "output" / "registered_accounts.json"
+            output_path = base_dir / "data" / "results" / "registered_accounts.json"
             output_path.parent.mkdir(parents=True)
             output_path.write_text(
                 """
@@ -106,7 +106,7 @@ class StorageTests(unittest.TestCase):
 
             save_registered_account(
                 base_dir,
-                "output/registered_accounts.json",
+                "data/results/registered_accounts.json",
                 {
                     "email": "alice@example.com",
                     "password": "newpass",
@@ -132,7 +132,7 @@ class StorageTests(unittest.TestCase):
             base_dir = Path(tmpdir)
             save_registered_account(
                 base_dir,
-                "output/registered_accounts.json",
+                "data/results/registered_accounts.json",
                 {
                     "email": "alice@example.com----pass1",
                     "password": "pass1",
@@ -143,7 +143,7 @@ class StorageTests(unittest.TestCase):
             )
             save_registered_account(
                 base_dir,
-                "output/registered_accounts.json",
+                "data/results/registered_accounts.json",
                 {
                     "email": "alice@example.com----pass1",
                     "api_key": "abcdEFGH1234567890key",
@@ -152,7 +152,7 @@ class StorageTests(unittest.TestCase):
             )
 
             data = __import__("json").loads(
-                (base_dir / "output" / "registered_accounts.json").read_text(encoding="utf-8")
+                (base_dir / "data" / "results" / "registered_accounts.json").read_text(encoding="utf-8")
             )
             self.assertEqual(data["accounts"][0]["display_name"], "Alan Searchfield diwl")
             self.assertEqual(data["accounts"][0]["api_key"], "abcdEFGH1234567890key")
@@ -162,7 +162,7 @@ class StorageTests(unittest.TestCase):
             base_dir = Path(tmpdir)
             save_registered_account(
                 base_dir,
-                "output/registered_accounts.json",
+                "data/results/registered_accounts.json",
                 {
                     "email": "alice@example.com----pass1",
                     "password": "pass1",
@@ -172,7 +172,7 @@ class StorageTests(unittest.TestCase):
             )
             save_registered_account(
                 base_dir,
-                "output/registered_accounts.json",
+                "data/results/registered_accounts.json",
                 {
                     "email": "alice@example.com----pass1",
                     "username": "Square-Creator-8f524cbdf4d47",
@@ -181,7 +181,7 @@ class StorageTests(unittest.TestCase):
             )
 
             data = __import__("json").loads(
-                (base_dir / "output" / "registered_accounts.json").read_text(encoding="utf-8")
+                (base_dir / "data" / "results" / "registered_accounts.json").read_text(encoding="utf-8")
             )
             self.assertEqual(data["accounts"][0]["username"], "Square-Creator-8f524cbdf4d47")
             self.assertEqual(data["accounts"][0]["display_name"], "Alan Searchfield diwl")
@@ -192,7 +192,7 @@ class StorageTests(unittest.TestCase):
 
             save_registered_account(
                 base_dir,
-                "output/registered_accounts.json",
+                "data/results/registered_accounts.json",
                 {
                     "email": "alice@example.com----pass1",
                     "cookie": "cookie",
@@ -201,9 +201,26 @@ class StorageTests(unittest.TestCase):
             )
 
             data = __import__("json").loads(
-                (base_dir / "output" / "registered_accounts.json").read_text(encoding="utf-8")
+                (base_dir / "data" / "results" / "registered_accounts.json").read_text(encoding="utf-8")
             )
             self.assertEqual(data["accounts"][0]["email"], "alice@example.com----pass1")
+
+    def test_save_registered_account_fails_after_backing_up_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            output_path = base_dir / "data" / "results" / "registered_accounts.json"
+            output_path.parent.mkdir(parents=True)
+            output_path.write_text("not json", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "凭证文件无效"):
+                save_registered_account(
+                    base_dir,
+                    "data/results/registered_accounts.json",
+                    {"email": "alice@example.com", "password": "pass1"},
+                )
+
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "not json")
+            self.assertEqual(len(list(output_path.parent.glob("registered_accounts.json.corrupt.*"))), 1)
 
 
 if __name__ == "__main__":

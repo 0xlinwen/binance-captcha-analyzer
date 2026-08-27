@@ -313,9 +313,8 @@ def _settle(page: Any, timeout: int = 8000) -> None:
     page.wait_for_timeout(800)
 
 
-def _debug_page(page: Any, label: str) -> None:
+def _debug_page(page: Any, label: str, debug_dir: Path) -> None:
     """保存页面证据，仅用于本地调试，不写入账号结果。"""
-    debug_dir = Path("output/creator_api_debug")
     debug_dir.mkdir(parents=True, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
     try:
@@ -430,36 +429,6 @@ _COLLECT_VISIBLE_TEXT_JS = """() => {
 }"""
 
 
-def _read_visible_display_name(page: Any) -> str:
-    """读取资料卡上实际画出来的昵称，不读接口/隐藏字段。"""
-    try:
-        candidates = page.evaluate(_COLLECT_VISIBLE_TEXT_JS)
-    except Exception as exc:
-        print(f"[creator-api] 读取可见文本失败: {exc}")
-        return ""
-    if not isinstance(candidates, list):
-        return ""
-    handle_count = sum(
-        1
-        for item in candidates
-        if re.search(r"@?Square-Creator-[A-Za-z0-9]+", str(item.get("text") or ""))
-    )
-    print(f"[creator-api] 可见文本 {len(candidates)} 个，句柄 {handle_count} 个")
-    if handle_count == 0:
-        sample = [str(item.get("text") or "") for item in candidates[:40]]
-        print(f"[creator-api] 可见文本样例: {sample}")
-        try:
-            debug_dir = Path("output/creator_api_debug")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / "visible_texts.json").write_text(
-                json.dumps(candidates, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-    return pick_visible_display_name(candidates)
-
-
 def _close_edit_form(page: Any) -> None:
     _click_by_texts(page, ("取消", "Cancel", "关闭", "Close"))
     if "creator-center" not in str(getattr(page, "url", "")):
@@ -511,7 +480,7 @@ def _wait_for_edit_profile_form(page: Any) -> bool:
     return False
 
 
-def _read_edit_profile(page: Any) -> tuple[str, str]:
+def _read_edit_profile(page: Any, debug_dir: Path) -> tuple[str, str]:
     """点击编辑后读取昵称和用户名，然后取消关闭，不改资料。"""
     if not _click_by_texts(page, ("编辑", "Edit")):
         print("[creator-api] 未找到编辑按钮")
@@ -519,7 +488,7 @@ def _read_edit_profile(page: Any) -> tuple[str, str]:
     page.wait_for_timeout(800)
     if not _wait_for_edit_profile_form(page):
         print("[creator-api] 编辑个人资料弹窗未出现")
-        _debug_page(page, "edit_profile_not_found")
+        _debug_page(page, "edit_profile_not_found", debug_dir)
         _close_edit_form(page)
         return "", ""
     try:
@@ -534,7 +503,7 @@ def _read_edit_profile(page: Any) -> tuple[str, str]:
         else:
             print("[creator-api] 编辑资料中未找到用户名")
         if not nickname and not username:
-            _debug_page(page, "edit_profile_fields_not_found")
+            _debug_page(page, "edit_profile_fields_not_found", debug_dir)
         return nickname, username
     finally:
         _close_edit_form(page)
@@ -583,8 +552,9 @@ def _describe_page(page: Any) -> str:
 class CreatorCenterApiExtractor:
     """进入创作者中心：读取 API 密钥，再打开编辑资料读取昵称和用户名。"""
 
-    def __init__(self, page: Any, *, page_timeout: int = 60000) -> None:
+    def __init__(self, page: Any, debug_dir: Path, *, page_timeout: int = 60000) -> None:
         self.page = page
+        self.debug_dir = debug_dir
         self.page_timeout = page_timeout
 
     def extract(self) -> CreatorCenterProfile:
@@ -608,7 +578,7 @@ class CreatorCenterApiExtractor:
             page.wait_for_timeout(1500)
             value = _read_api_value(page)
         if not value:
-            _debug_page(self.page, "api_key_not_found")
+            _debug_page(self.page, "api_key_not_found", self.debug_dir)
             raise RuntimeError(f"创作者中心未找到 API 密钥 ({_describe_page(self.page)})")
         print(f"[creator-api] 已读取 API 密钥 ({_mask_key(value)})")
 
@@ -616,7 +586,7 @@ class CreatorCenterApiExtractor:
         _click_by_texts(self.page, ("好的", "OK", "Got it"))
         self.page.wait_for_timeout(500)
         self.page = _return_to_creator_home(self.page)
-        nickname, username = _read_edit_profile(self.page)
+        nickname, username = _read_edit_profile(self.page, self.debug_dir)
         return CreatorCenterProfile(api_key=value, display_name=nickname, username=username)
 
     def _wait_for_profile_card(self) -> None:
@@ -662,10 +632,13 @@ class CreatorCenterApiExtractor:
             pass
 
 
-def extract_creator_api(page: Any, config: dict, *, page_timeout: int = 60000) -> CreatorCenterProfile:
+def extract_creator_api(page: Any, base_dir: Path, *, page_timeout: int = 60000) -> CreatorCenterProfile:
     """进入创作者中心并读取 API 与展示名称；缺失 API 时尝试创建。"""
-    _ = config
-    return CreatorCenterApiExtractor(page, page_timeout=page_timeout).extract()
+    return CreatorCenterApiExtractor(
+        page,
+        base_dir / "artifacts" / "debug" / "creator_api",
+        page_timeout=page_timeout,
+    ).extract()
 
 
 def api_metadata(profile: CreatorCenterProfile) -> dict:

@@ -8,15 +8,31 @@
 - 最近完成：文件锁已改为 `src/binance_analyzer/file_lock.py` + `portalocker`，账号存储、代理 IP 存储、注册账号存储和创作者 API 配额均不再直接依赖 Unix-only 的 `fcntl`，Windows/macOS 共用同一实现。
 - 最近完成：登录/注册成功后的 Dashboard 判定改为使用 `page_signals.is_dashboard_url()`；Creator API 入口点击后会等待导航并切换到新打开的 tab，避免在旧页面读取密钥。
 - 最近实测：2026-08-20 真实登录 `accounts.txt` 中的 2 个账号均通过邮箱 MFA 并写入 Cookie/CSRF；Creator Center 页面实际按钮文案为“创建 API 密钥”，已加入提取入口选择器。因成功账号已从队列移除，修复后的 API 真实读取尚未复测。
-- 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `output/creator_api_debug/` 截图与文本并失败，不再从整页文本猜值。已清理 `output/registered_accounts.json` 中错误 API 字段。
-- 最近实测：2026-08-20 对 `tommimjr0@outlook.com` 执行真实登录时，在登录页滑块验证码阶段被弹窗拦截，流程返回 `AUTH_FAILED`，未进入 Creator Center，未生成 API 调试截图；账号已写入 `output/failed_accounts.txt`，需重新加入待处理队列后再测。
+- 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `artifacts/debug/creator_api/` 截图与文本并失败，不再从整页文本猜值。已清理历史凭证中的错误 API 字段。
+- 最近实测：2026-08-20 对 `tommimjr0@outlook.com` 执行真实登录时，在登录页滑块验证码阶段被弹窗拦截，流程返回 `AUTH_FAILED`，未进入 Creator Center，未生成 API 调试截图；账号已写入失败结果，需重新加入待处理队列后再测。
 - 最近修复：创作者中心进页后无点击、弹窗已有密钥仍失败。入口「查看 API >」无法 exact 匹配；新手引导层会挡住点击；密钥是「API 密钥」标签后的纯文本而不是 input。提取器改为包含匹配、先关引导、禁止 `networkidle` 空等，并按标签读取密钥。真实页面点击尚未复测。
 - 最近完成：提取 API 密钥后同时读取资料卡展示名称（`@Square-Creator-` 前方的 display_name，例如 `Alan Searchfield diwl`），写入 `registered_accounts.json` 的 `display_name`。找不到名称时密钥仍保存，display_name 留空。
 - 最近完成：抽完 API key 后点击「编辑」，从「编辑个人资料」读取「昵称」写入 `display_name`、「用户名」写入 `username`，然后点取消关闭，不改资料。
 - 最近完成：新增 `src/binance_cloud/` 实验性 SQLite 云端 API 与 Windows Worker 入口；Linux 创建登录任务并异步 POST 给 Windows，Windows 复用 `register_account`，每个账号完成后回调 Linux；Cookie 额外记录 `cookie_expires_at`，SQLite 长字段使用 `TEXT`。
 - 最近完成：云端服务保留可选 Worker/回调 Token 校验（默认未配置时放行），并增加 Worker 注册与执行心跳、任务租约超时回收、固定代理任务计数和回调重试；新增任务取消、数据库备份、日志清理、SQLite WAL 和部署模板。
 - 最近完成：Worker 任务已传递 `client_id`/`refresh_token`；按需求移除 Cookie 在线检查逻辑、接口、模块、数据库状态字段和测试，Cookie 仍仅在登录成功时保存并保留 `cookie_expires_at`。
-- 最近完成：成功回调缺少 Cookie 时拒绝；新增 `/api/accounts/{id}/relogin` 重新登录入口；全量测试仍为 151 项通过。
+- 最近完成：云端任务状态收敛到数据库层，Worker 心跳续租、租约/调度失败终态统计、取消后的迟到回调忽略；新增 `src/binance_cloud/protocols.py` 强类型执行/回调协议，回调 Token 可独立配置，Worker 取消后停止后续账号。155 项测试通过。
+- 最近完成：全局批量任务使用 `task_groups` 统一统计；Lark Webhook 从 Linux `config/cloud.json` 的 `lark.webhook_url` 读取，单账号不通知，连续 5 个失败和全局完成各通知一次。维护线程会补发无回调（如代理配额超限）任务组通知，通知异常不会影响回调落库。159 项测试通过。
+- 最近完成：Windows Worker 支持 `worker_max_workers` 受控并发，同一 HTTP 任务按账号拆分线程执行；Lark 通知仅在发送成功后标记已发送，失败可由维护线程再次尝试。配置模板已补充并发参数。
+- 最近完成：云端任务支持 `idempotency_key` 幂等创建；批量提交命令支持 `--timeout-seconds` 整体等待超时。全量 161 项测试通过。
+- 最近完成：Linux/Windows 的协议版本均从角色配置读取；Linux 派发前检查 Windows `/health` 协议版本，任务请求必须携带版本，Windows 不匹配即拒绝执行。162 项测试通过。
+- 最近完成：Worker 协议版本不兼容时，Linux 按任务组/任务幂等键发送一次 Lark 系统告警；未配置 Webhook 时错误仍写入任务明细和执行日志，不影响现有重试流程。162 项测试通过。
+- 最近完成：配置按角色拆分到 `config/automation.json`、`config/worker.json`、`config/cloud.json`；协议版本、Worker ID、并发和调试开关归 Worker，数据库/回调/Lark 归 Cloud，自动化参数归 automation。Linux/Windows 业务配置不再接受旧环境变量或根目录配置回退，缺失字段直接报错。README 和部署脚本已同步启动路径。
+- 最近完成：根目录 `config.json` 的自动化字段已逐字段同步到 `config/automation.json`；本地 CLI 与 Windows Worker 均只读取该自动化配置，根目录文件仅保留作迁移核对。运行文件按 `data/accounts`、`data/results`、`data/runtime` 分类，调试证据写入 `artifacts/debug`；相对路径均相对各自机器的项目根目录解析。
+- 最近完成：自动化配置已移除 Worker 专属 `debug_mode` 和无效的 `mode_inf`；Windows Worker 不再把 `worker.json` 合并进自动化配置，`debug_mode`、`worker_max_workers` 只从 Worker 配置读取。修复正式模式查询任务状态时引用未定义请求头的问题。
+- 最近完成：Creator API 调试证据和本地失败日志均绑定调用传入的项目根目录，不再依赖启动时当前目录；凭证 JSON 损坏时保存 `.corrupt.*` 副本后立即报错，不再清空内容继续写入。164 项测试通过。
+- 最近完成：任务组 Lark 告警和完成通知使用 SQLite 通知事件键去重；回调线程与维护线程并发触发时只发送一次，Webhook 失败会释放事件键以便后续重试。邮件演示与自动化配置示例统一使用 `data/accounts/pending.txt`，`mode_options` 仅用于人工复制。164 项测试通过。
+- 最近完成：Worker 账号执行线程池提升为进程内全局池，`worker_max_workers` 约束同一 Windows 的全部任务总并发；批量客户端超时时会取消已提交子任务。单账号批量提交不创建任务组、不发送 Lark 通知。162 项测试通过。
+- 最近实测：2026-08-26 本机 Cloud API -> Worker -> Binance 登录 -> 回调闭环成功；MFA、Cookie/CSRF 均成功保存。发现并修复任务失败统计 SQL 将 success 重复计入 failed 的问题；Creator Center API 提取仍可能失败但不影响登录 Cookie 保存。
+- 最近完成：新增 `credential_export.py` 统一导出 Cookie/CSRF/过期时间，新增 `automation_driver.py` 最小驱动协议和 `AutomationResult` 结果载体；注册状态机增加企业注册页识别与返回个人注册；未引入会话二次验证、后台 Cookie 检查、加密/3 天删除或新测试体系。
+- 最近完成：`orchestrator.register_account()`、CLI 与 Windows Worker 已统一使用 `AutomationResult`；凭证通过 `credentials` 载体进入回调，Worker 不再依赖 `result_sink` 传递 Cookie。旧式返回值仅在 CLI/Worker 边界做兼容读取。修复 Worker 任务模式被代理模式覆盖的问题，并补充配置校验测试。本地 CLI 支持 `--count N` 限制本次处理账号数；云端代理失败、限流和可重试回调会按明细重试次数重新入队，耗尽后才标记失败。Windows 回调采用 `data/runtime/callback_outbox.json` 持久队列并退避重试；凭证带更新时间，Linux 拒绝旧回调覆盖重登后的新 Cookie。
+- 最近完成：批量任务改为创建 Linux `task_groups`，多个子 job 共享全局统计；Lark Webhook 从 Linux `config/cloud.json` 的 `lark.webhook_url` 读取，连续 5 个失败和全局完成各通知一次，单账号任务不通知。159 项测试通过。
+- 最近完成：云端 `JobIn.mode` 与 Worker payload 已支持 `login/register`，Windows Worker 按任务覆盖本地 mode，可并行执行两种独立流程；并发任务的浏览器 Worker ID 改为 job/item 唯一值，避免缓存目录冲突。全量 155 项测试通过。
 
 ## 架构约定
 
@@ -55,8 +71,8 @@ python main.py --refresh-cache
 - Python：建议 3.10+。
 - 依赖：`requirements.txt` 包含 `portalocker>=2.8,<4`，用于跨平台文件锁。
 - 浏览器：主流程使用本机 Google Chrome（可用 `CHROME_PATH` 覆盖路径）；缓存预热仍用 `channel="chrome"`。Playwright 包仍需安装以便 CDP 控制。
-- 必需配置：`config.json`，可从 `config.example.json` 复制。
-- 必需凭证：`OPENROUTER_API_KEY` 或 `config.json.openrouter_api_key`。
+- 必需自动化配置：`config/automation.json`，可从 `config/automation.example.json` 复制；根目录 `config.json` 不参与运行。
+- 必需凭证：`OPENROUTER_API_KEY` 或 `config/automation.json.openrouter_api_key`。
 - 账号文件：`accounts_file` 指向的文本文件，每行支持 `email:password`、`email----password` 或 `email----password----client_id----refresh_token`。
 
 ## 重要技术决策
