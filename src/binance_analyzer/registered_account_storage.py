@@ -13,8 +13,7 @@ from .file_lock import lock, unlock
 LOGIN_MANAGED_FIELDS = {
     "cookie",
     "csrftoken",
-    "cookie_expires_at",
-    "credential_updated_at",
+    "credential_exported_at",
     "enabled",
     "name",
     "mail_api_url",

@@ -6,7 +6,6 @@ import os
 import json
 import threading
 import time
-from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -173,8 +172,7 @@ def execute(payload: dict) -> None:
                       "error_message": "登录成功但未导出凭证" if callback_error_code == "credentials_missing" else getattr(automation_result, "error_message", None)}
             if callback_status == "success":
                 result.update({"cookie": credentials.cookie, "csrftoken": credentials.csrftoken,
-                               "cookie_expires_at": credentials.cookie_expires_at,
-                               "credential_updated_at": credentials.credential_updated_at or datetime.now(timezone.utc).isoformat()})
+                               "credential_exported_at": credentials.credential_exported_at})
         except Exception as exc:
             result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
         finally:

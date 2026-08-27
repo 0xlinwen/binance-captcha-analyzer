@@ -378,7 +378,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
             print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
             credentials = export_credentials(page)
             automation_result = replace(automation_result, credentials=credentials)
-            cookie_string, csrftoken, cookie_expires_at = credentials.cookie, credentials.csrftoken, credentials.cookie_expires_at
+            cookie_string, csrftoken = credentials.cookie, credentials.csrftoken
             if cookie_string and csrftoken:
                 account_data = {
                     "name":             f"账号_{email_addr.split('@')[0]}",
@@ -386,8 +386,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "password":         email_password,
                     "cookie":           cookie_string,
                     "csrftoken":        csrftoken,
-                    "cookie_expires_at": cookie_expires_at,
-                    "credential_updated_at": credentials.credential_updated_at,
+                    "credential_exported_at": credentials.credential_exported_at,
                     "enabled":          True,
                     "avatar_changed":   False,
                     "nickname_changed": False,

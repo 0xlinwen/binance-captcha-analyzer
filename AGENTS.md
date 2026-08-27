@@ -5,10 +5,12 @@
 - 目标：自动化 Binance 登录/注册，支持浏览器自动化、验证码和邮箱 MFA、代理、Cookie/CSRF 导出，以及 Linux Cloud -> Windows Worker 的远程任务闭环。
 - 当前进展：本地 CLI、Windows Worker、Linux Cloud 三个入口均可运行；本地和 Windows 共用 `config/automation.json`，Cloud 使用 SQLite 保存任务、日志和凭证。2026-08-26 已实测本机 Cloud -> Worker -> 登录 -> 回调闭环，MFA、Cookie 和 CSRF 已写入 Cloud 数据库。
 - 当前欠账：Creator Center 的真实 API 密钥提取在最近一次成功登录后的页面上尚未复测；它失败不会影响登录 Cookie 保存。未实现后台 Cookie 在线检查、会话二次验证、加密和按天删除 Cookie，均为明确未纳入范围的能力。
-- 最近验证：`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'` 于当前工作区通过 164 项；`PYTHONPATH=src python3 -m compileall -q src tests demo` 和 `git diff --check` 通过。
+- 最近验证：`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'` 于当前工作区通过 166 项；`PYTHONPATH=src python3 -m compileall -q src tests demo` 和 `git diff --check` 通过。
 - 配置与运行文件：配置按 `automation.json`、`worker.json`、`cloud.json` 分角色拆分，无根目录 `config.json` 回退。相对运行路径均相对各自项目根目录：账号队列在 `data/accounts/`，本地结果在 `data/results/`，运行状态在 `data/runtime/`，调试证据在 `artifacts/debug/`。
 - 最近完成：Cloud 在任意工作目录启动时仍从项目根目录读取 `config/cloud.json` 和解析相对 SQLite 路径；Windows 回调 Outbox 位于 `data/runtime/callback_outbox.json`。任务组 Lark 告警和完成通知通过 SQLite 事件键去重，失败会在后续维护周期重试。
 - 文档：README 已描述 Cloud/Worker/SQLite/回调/Lark 闭环、三份配置的职责与回调方向、协议版本、Worker ID/并发、Linux 监听与反向代理前提，以及 Windows 部署路径模板。
+- 部署状态：Linux Cloud 已部署到 `/root/binance-captcha-analyzer`，由 `binance-cloud.service` 管理并监听 `0.0.0.0:8001`；公网健康接口已验证。Linux 专用 `config/cloud.json` 的回调地址为 `http://62.169.26.83:8001/api/worker/callback`，Linux 到 Windows Worker `43.165.177.157:8100` 的健康接口已验证，协议版本为 `1`。
+- 凭证时间字段已统一为 `credential_exported_at`，表示本次从浏览器 Context 导出 Cookie/CSRF 的 UTC 时间；不再读取或保存 Cookie 内部 `expires`，也不再使用 `cookie_expires_at`、`credential_updated_at`。当前测试阶段数据库无历史数据，SQLite 直接按新 schema 创建；该字段只用于凭证新旧回调覆盖判断，不代表 Cookie 过期时间。
 
 ## 架构约定
 
