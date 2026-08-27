@@ -81,10 +81,10 @@ class CloudDatabaseTests(unittest.TestCase):
                 db.mark_items_running(job["id"], "dispatching", 60)
                 db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
                                   "worker_id": "worker", "status": "success", "cookie": cookie,
-                                  "credential_updated_at": updated_at})
+                                  "credential_exported_at": updated_at})
             credential = db.credential(second_item["account_id"])
             self.assertEqual(credential["cookie"], "new-cookie")
-            self.assertEqual(credential["credential_updated_at"], "2026-08-27T10:00:00+00:00")
+            self.assertEqual(credential["credential_exported_at"], "2026-08-27T10:00:00+00:00")
 
     def test_idempotency_key_reuses_existing_job(self):
         with TemporaryDirectory() as temp:

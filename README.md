@@ -197,7 +197,7 @@ Linux 每次派发前会检查 Windows `/health` 的 `protocol_version`，并在
 
 当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须在 `config/cloud.json` 配置 `windows_worker_url` 与 `callback_url`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
 
-Windows 在回调前会把结果写入 `data/runtime/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_updated_at`，Linux 只接受较新的凭证，避免 Cookie 过期重登后旧回调迟到并覆盖新 Cookie。
+Windows 在回调前会把结果写入 `data/runtime/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_exported_at`（本次从浏览器导出的时间），Linux 只接受较新的凭证，避免重新登录后的旧回调迟到并覆盖新 Cookie。该字段不是 Cookie 过期时间；当前系统不提供后台 Cookie 在线有效性检查。
 
 附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
 
