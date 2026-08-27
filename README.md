@@ -17,6 +17,35 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 ## 整体架构
 
 ```
+提交端（CLI / 前端 / 其他系统）
+        │ POST /api/login-jobs，mode=login 或 register
+        ▼
+Linux Cloud API（src/binance_cloud/api.py）
+  读取 config/cloud.json
+  创建任务、状态和账号记录 ────────────────► SQLite：data/binance.db
+        │ GET /health 后校验 protocol_version
+        │ POST /worker/execute-login
+        ▼
+Windows Worker（src/binance_cloud/worker.py）
+  读取 config/worker.json + config/automation.json
+  worker_id 代表这一台 Windows 节点
+        │ worker_max_workers 控制整台节点的账号并发
+        ▼
+浏览器自动化（register_account）
+  登录/注册 -> 邮箱 MFA -> 导出 Cookie / CSRF / 过期时间
+        │ POST /api/worker/callback
+        │ 失败时持久化到 data/runtime/callback_outbox.json 后重试
+        ▼
+Linux Cloud API ────────────────────────────────► SQLite 凭证和任务结果
+        │                                            credentials / execution_logs
+        └── 任务组连续 5 次失败、全部完成 ───────► Lark Webhook（可选）
+```
+
+凭证只由 Linux SQLite 对外提供；Windows 保存的是自动化运行文件、回调重试队列和本地调试结果。每台机器的相对路径都以各自项目根目录为基准。
+
+### 本地自动化流程
+
+```
 ┌─────────────────────────────────────────────────────────┐
 │                    cli.py (入口)                         │
 │         命令行解析 / 并发调度 / 信号处理                   │
@@ -86,7 +115,7 @@ src/binance_analyzer/
   local_cache.py                       # 应用层静态资源缓存
   traffic_monitor.py                   # 流量统计（按类型/域名/请求）
   fingerprint.py                       # 浏览器指纹随机化（UA/时区/WebGL）
-  logger.py                            # 统一日志管理（每日日志、成功/失败分类）
+  logger.py                            # 失败账号详细日志与运行统计
   constants.py                         # 全局常量（超时、重试、日志格式等）
   utils.py                             # 工具函数（重试策略、弹窗处理、文件名清理）
   exceptions.py                        # 自定义异常层级（可重试/不可重试分类）
@@ -137,6 +166,8 @@ PYTHONPATH=src uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
 
 Linux 的业务配置统一写在 `config/cloud.json`（数据库路径、Windows Worker 地址、回调地址、协议版本、租约时长和 Lark Webhook）。数据库父目录需由运行用户具备写权限。鉴权仍可按需通过 `BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN` 启用。
 
+直接对公网暴露 API 时使用上面的 `--host 0.0.0.0`。`deploy/linux/binance-cloud.service` 为反向代理部署准备，默认只监听 `127.0.0.1:8000`；使用该模板时必须由 Nginx/Caddy 等反向代理把公网域名转发到该地址。不要在只监听 `127.0.0.1` 的情况下直接使用 `http://Linux公网IP:8000`。
+
 Windows 启动执行服务（需在 Worker 目录准备 `config/automation.json` 和 `config/worker.json`）：
 
 ```powershell
@@ -154,6 +185,8 @@ Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
 `config/automation.json`、账号/输出目录的 Worker 工作目录。若 Linux 启用了
 `BINANCE_WORKER_TOKEN`，Windows 端也必须设置同名变量；回调鉴权可另设
 `BINANCE_CALLBACK_TOKEN`。
+
+`deploy/windows/start_worker.ps1` 中的 `C:\binance-captcha-analyzer` 是示例路径；复制该模板前，必须将 `PYTHONPATH`、`BINANCE_WORKER_BASE_DIR` 和 `Set-Location` 同步替换为 Windows 实际部署目录。README 中的 `C:\binance-worker` 仅是等价示例目录。
 
 Windows `config/worker.json` 可设置 `worker_max_workers` 控制同一任务内的账号并发数，
 例如 `2` 表示该 Windows Worker 全部任务最多同时执行两个账号，其余账号排队；默认值为 `1`（串行）。
@@ -210,6 +243,47 @@ cp config/cloud.example.json config/cloud.json
 ```
 
 ### 配置项说明
+
+三份配置文件职责严格分离：
+
+| 配置文件 | 部署位置 | 读取者 | 负责内容 | 不应包含 |
+|---|---|---|---|---|
+| `config/automation.json` | 本地 CLI、Windows Worker | `cli.py`、Worker | 浏览器、登录/注册、邮箱、验证码、Creator API、代理、本地账号文件和结果文件 | Cloud URL、Worker ID、Lark、SQLite |
+| `config/worker.json` | Windows Worker | `worker.py` | Windows 节点 ID、节点总并发、调试模式、独立回调地址、协议版本 | 浏览器和代理具体参数、SQLite、Lark |
+| `config/cloud.json` | Linux Cloud | `api.py` | SQLite、Windows Worker 地址、云端回调公网地址、租约、Lark、协议版本 | 浏览器、邮箱、验证码、账号文件 |
+
+根目录 `config.json` 仅供迁移核对，运行时不会读取，也没有回退逻辑。
+
+#### `worker.json`（Windows 节点配置）
+
+```jsonc
+{
+  "protocol_version": "1", // 必须与 Linux cloud.json 完全相同
+  "worker_id": "windows-01", // Windows 节点稳定标识，不是账号、线程或任务 ID
+  "worker_max_workers": 1, // 整台 Windows Worker 同时运行的账号上限
+  "debug_mode": false, // true 时跳过 Linux 的任务状态查询和心跳
+  "callback_url": "https://linux.example.com/api/worker/callback" // 独立调试和 Worker 注册时使用
+}
+```
+
+Linux 派发的任务会在请求中携带 `cloud.json.callback_url`，因此生产任务的回调目标以 Linux 配置为准；`worker.json.callback_url` 用于独立调用 Worker、`/worker/register` 和没有 Linux 派发的调试场景。`worker_id` 用于 Linux 记录这台节点的心跳和当前任务；每个账号的浏览器隔离目录由任务和明细 ID 自动生成。
+
+#### `cloud.json`（Linux 服务配置）
+
+```jsonc
+{
+  "protocol_version": "1", // 必须与每台 Windows Worker 的 worker.json 相同
+  "database_path": "data/binance.db", // 相对 Linux 项目根目录解析
+  "windows_worker_url": "http://Windows公网IP:8100", // Linux 能访问的 Worker 地址
+  "callback_url": "https://Linux域名/api/worker/callback", // Windows 能访问的 Linux 回调地址
+  "task_lease_seconds": 1800, // Worker 心跳租约秒数
+  "lark": {"webhook_url": ""} // 可选：全局任务告警和完成通知
+}
+```
+
+`windows_worker_url` 的网络方向是 Linux -> Windows；`callback_url` 的方向是 Windows -> Linux。两台机器都有公网 IP 时，Windows 应放行 Worker 监听端口（默认 `8100`），Linux 应放行反向代理或 Uvicorn 实际监听的回调端口。
+
+#### `automation.json`（本地 CLI 与 Windows 自动化配置）
 
 ```jsonc
 {
