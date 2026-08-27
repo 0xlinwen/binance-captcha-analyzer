@@ -7,7 +7,7 @@ Type=simple
 WorkingDirectory=/opt/binance-captcha-analyzer
 Environment=PYTHONPATH=/opt/binance-captcha-analyzer/src
 EnvironmentFile=/etc/binance-cloud.env
-ExecStart=/opt/binance-captcha-analyzer/.venv/bin/uvicorn binance_cloud.api:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/binance-captcha-analyzer/.venv/bin/uvicorn binance_cloud.linux.api:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 

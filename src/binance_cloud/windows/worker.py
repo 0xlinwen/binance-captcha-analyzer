@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Header
 from binance_analyzer.config import load_config
 from binance_analyzer.automation.orchestrator import register_account
 from .callback_outbox import CallbackOutbox
-from .protocols import ExecuteLoginPayload
+from ..shared.protocols import ExecuteLoginPayload
 
 
 app = FastAPI(title="Binance Login Windows Worker")

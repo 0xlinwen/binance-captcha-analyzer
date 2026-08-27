@@ -11,7 +11,7 @@ Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + Op
 ```bash
 source .venv/bin/activate
 export PYTHONPATH="$PWD/src"
-python -m uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8001
+python -m uvicorn binance_cloud.linux.api:app --host 0.0.0.0 --port 8001
 ```
 
 启动前确认 `config/cloud.json` 已配置完成。端口 `8001` 是当前云端回调端口；如改用其他端口，必须同步修改 Worker 的回调地址和防火墙规则。启动后检查：
@@ -28,7 +28,7 @@ curl http://127.0.0.1:8001/health
 $env:PYTHONPATH = "$PWD\src"
 $env:BINANCE_WORKER_BASE_DIR = "$PWD"
 
-python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
+python -m uvicorn binance_cloud.windows.worker:app --host 0.0.0.0 --port 8100
 ```
 
 启动前确认 `config/automation.json` 和 `config/worker.json` 已配置完成。启动后可检查：
@@ -55,13 +55,13 @@ curl http://127.0.0.1:8100/health
 提交端（CLI / 前端 / 其他系统）
         │ POST /api/login-jobs，mode=login 或 register
         ▼
-Linux Cloud API（src/binance_cloud/api.py）
+Linux Cloud API（src/binance_cloud/linux/api.py）
   读取 config/cloud.json
   创建任务、状态和账号记录 ────────────────► SQLite：data/binance.db
         │ GET /health 后校验 protocol_version
         │ POST /worker/execute-login
         ▼
-Windows Worker（src/binance_cloud/worker.py）
+Windows Worker（src/binance_cloud/windows/worker.py）
   读取 config/worker.json + config/automation.json
   worker_id 代表这一台 Windows 节点
         │ worker_max_workers 控制整台节点的账号并发
@@ -170,10 +170,16 @@ src/proxy_forwarder/
   logging.py                           # 代理运行时日志
 
 src/binance_cloud/
-  api.py                               # Linux 云端任务 API 与回调
-  database.py                          # SQLite 任务、凭证、日志持久化
-  worker.py                            # Windows 执行 Worker
-  protocols.py                         # 云端/Worker 请求协议
+  linux/
+    api.py                             # Linux 云端任务 API 与回调
+    database.py                        # SQLite 任务、凭证、日志持久化
+  windows/
+    worker.py                          # Windows 执行 Worker
+    callback_outbox.py                 # 回调重试队列
+  shared/
+    protocols.py                       # 云端/Worker 请求协议
+  tools/
+    batch_submit.py                    # 账号文件批量提交工具
 data/
   accounts/pending.txt                 # 待处理账号队列
   results/
@@ -205,7 +211,7 @@ python -m pip install -r requirements-server.txt
 Linux 云端启动 API：
 
 ```bash
-PYTHONPATH=src uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8001
+PYTHONPATH=src uvicorn binance_cloud.linux.api:app --host 0.0.0.0 --port 8001
 ```
 
 Linux 的业务配置统一写在 `config/cloud.json`（数据库路径、Windows Worker 地址、回调地址、协议版本、租约时长和 Lark Webhook）。数据库父目录需由运行用户具备写权限。鉴权仍可按需通过 `BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN` 启用。
@@ -216,7 +222,7 @@ Windows 启动执行服务（需在 Worker 目录准备 `config/automation.json`
 
 ```powershell
 $env:BINANCE_WORKER_BASE_DIR = "C:\\binance-worker"
-python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
+python -m uvicorn binance_cloud.windows.worker:app --host 0.0.0.0 --port 8100
 ```
 
 本地直接调试 Worker、暂时没有 Linux 任务状态接口时，可在 Windows 的
@@ -236,6 +242,38 @@ Windows `config/worker.json` 可设置 `worker_max_workers` 控制同一任务�
 例如 `2` 表示该 Windows Worker 全部任务最多同时执行两个账号，其余账号排队；默认值为 `1`（串行）。
 Linux 每次派发前会检查 Windows `/health` 的 `protocol_version`，并在任务请求中携带相同版本；版本不一致时任务不执行并记录为派发失败。Linux 与 Windows 必须部署同一版本代码。
 版本不兼容时，如果 Linux `config/cloud.json` 配置了 `lark.webhook_url`，Linux 会发送一次系统告警；未配置时不发送外部通知，但错误会写入任务状态和执行日志，任务仍按重试策略处理。
+
+#### 更新两端后再验收
+
+目录结构、请求协议或回调逻辑更新后，必须先把 Linux Cloud 与 Windows Worker 更新到同一 Git 提交并重启，再创建真实登录或注册任务。只让一端更新会导致 Python 模块入口、请求模型或回调字段不一致；`protocol_version` 相同也不能替代提交版本一致。
+
+两台服务器分别在各自代码库根目录执行：
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only origin main
+git rev-parse --short HEAD
+```
+
+两端最后一条命令输出必须相同。`--ff-only` 会在服务器存在未提交改动或需要合并时直接停止，不会覆盖服务器上的配置文件；先处理这些改动后再更新。
+
+Linux 更新后重启 Cloud 服务并检查：
+
+```bash
+sudo systemctl restart binance-cloud
+sudo systemctl status --no-pager binance-cloud
+curl http://127.0.0.1:8001/health
+```
+
+Windows 更新后停止旧 Worker 进程，在代码库根目录重新运行：
+
+```powershell
+.\deploy\windows\start_worker.ps1
+curl http://127.0.0.1:8100/health
+```
+
+随后从 Linux 检查 Windows `/health`，再创建单账号任务。只有任务完成且 Linux SQLite 出现对应凭证和执行日志，才算 Cloud -> Worker -> 回调闭环验收通过。
 
 接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。请求体的 `mode` 可选 `login` 或 `register`，同一 Worker 可并行处理两种独立流程；当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 流程。
 
@@ -450,7 +488,7 @@ email4@outlook.com----password4----client_id----refresh_token
 在 Linux API 已启动、Windows Worker 已注册并可访问时，可从任意能访问 Linux 的机器执行：
 
 ```bash
-PYTHONPATH=src python -m binance_cloud.batch_submit \
+PYTHONPATH=src python -m binance_cloud.tools.batch_submit \
   --file data/accounts/pending.txt \
   --cloud-url http://Linux公网IP:8000 \
   --mode login \
