@@ -13,6 +13,7 @@ class CallbackPayload(BaseModel):
     cookie: str | None = None
     csrftoken: str | None = None
     cookie_expires_at: str | None = None
+    credential_updated_at: str | None = None
     error_code: str | None = None
     error_message: str | None = None
 

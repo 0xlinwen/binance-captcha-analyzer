@@ -112,6 +112,8 @@ class StorageTests(unittest.TestCase):
                     "password": "newpass",
                     "cookie": "newcookie",
                     "csrftoken": "newtoken",
+                    "cookie_expires_at": "2026-09-01T00:00:00+00:00",
+                    "credential_updated_at": "2026-08-27T00:00:00+00:00",
                     "enabled": True,
                 },
             )
@@ -121,6 +123,8 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(data["accounts"][0]["email"], "alice@example.com")
             self.assertEqual(data["accounts"][0]["password"], "newpass")
             self.assertEqual(data["accounts"][0]["cookie"], "newcookie")
+            self.assertEqual(data["accounts"][0]["cookie_expires_at"], "2026-09-01T00:00:00+00:00")
+            self.assertEqual(data["accounts"][0]["credential_updated_at"], "2026-08-27T00:00:00+00:00")
             self.assertEqual(data["accounts"][0]["display_name"], "keep-me")
 
     def test_save_registered_account_updates_display_name_when_provided(self) -> None:

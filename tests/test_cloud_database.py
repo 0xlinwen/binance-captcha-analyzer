@@ -53,6 +53,39 @@ class CloudDatabaseTests(unittest.TestCase):
             self.assertEqual(current["items"][0]["status"], "failed")
             self.assertEqual(current["status"], "completed")
 
+    def test_proxy_failure_is_requeued_until_retry_limit(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "a@example.com", "password": "pw"}])
+            item = db.get_job(job["id"])["items"][0]
+            db.mark_items_running(job["id"], "dispatching", 60)
+            db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                              "worker_id": "worker", "status": "proxy_failed"})
+            current = db.get_job(job["id"])["items"][0]
+            self.assertEqual(current["status"], "retryable")
+            self.assertEqual(current["retry_count"], 1)
+            db.requeue_retryable()
+            self.assertEqual(db.get_job(job["id"])["items"][0]["status"], "queued")
+
+    def test_delayed_older_cookie_does_not_replace_newer_cookie(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            first = db.create_job([{"email": "a@example.com", "password": "pw"}])
+            second = db.create_job([{"email": "a@example.com", "password": "pw"}])
+            first_item = db.get_job(first["id"])["items"][0]
+            second_item = db.get_job(second["id"])["items"][0]
+            for job, item, cookie, updated_at in (
+                (second, second_item, "new-cookie", "2026-08-27T10:00:00+00:00"),
+                (first, first_item, "old-cookie", "2026-08-27T09:00:00+00:00"),
+            ):
+                db.mark_items_running(job["id"], "dispatching", 60)
+                db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                                  "worker_id": "worker", "status": "success", "cookie": cookie,
+                                  "credential_updated_at": updated_at})
+            credential = db.credential(second_item["account_id"])
+            self.assertEqual(credential["cookie"], "new-cookie")
+            self.assertEqual(credential["credential_updated_at"], "2026-08-27T10:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

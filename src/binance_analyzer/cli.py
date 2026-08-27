@@ -164,7 +164,10 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description="Binance 账号处理工具")
     parser.add_argument("--refresh-cache", action="store_true", help="刷新浏览器缓存（重新预热）")
+    parser.add_argument("--count", type=int, help="本次最多处理的账号数量")
     args = parser.parse_args()
+    if args.count is not None and args.count <= 0:
+        parser.error("--count 必须是正整数")
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -179,6 +182,8 @@ def main():
         return
 
     accounts = load_accounts(base_dir, config["accounts_file"])
+    if args.count is not None:
+        accounts = accounts[:args.count]
     initialize_creator_api_quota(base_dir, config)
 
     runtime_cfg = config.get("runtime", {})

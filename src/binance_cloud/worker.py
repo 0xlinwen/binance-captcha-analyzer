@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -12,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Header
 
 from binance_analyzer.config import load_config
 from binance_analyzer.orchestrator import register_account
+from .callback_outbox import CallbackOutbox
 from .protocols import ExecuteLoginPayload
 
 
@@ -22,6 +24,7 @@ LINUX_CALLBACK_URL = os.getenv("BINANCE_CALLBACK_URL", "")
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", WORKER_TOKEN)
 WORKER_ID = os.getenv("BINANCE_WORKER_ID", "windows-01")
+CALLBACK_OUTBOX = CallbackOutbox(BASE_DIR / "output" / "callback_outbox.json")
 
 
 def _config_for_task(proxy: dict, mode: str) -> dict:
@@ -53,31 +56,44 @@ def _config_for_task(proxy: dict, mode: str) -> dict:
     return config
 
 
-def _send_callback(url: str, payload: dict, headers: dict) -> bool:
-    for attempt in range(3):
+def _post_callback(url: str, payload: dict) -> bool:
+    try:
+        headers = {"X-Worker-Token": CALLBACK_TOKEN} if CALLBACK_TOKEN else {}
+        requests.post(url, json=payload, headers=headers, timeout=30).raise_for_status()
+        return True
+    except requests.RequestException:
+        return False
+
+
+def _queue_callback(url: str, payload: dict) -> None:
+    if not url:
+        return
+    CALLBACK_OUTBOX.enqueue(url, payload)
+    CALLBACK_OUTBOX.deliver_due(_post_callback)
+
+
+def _callback_retry_loop() -> None:
+    while True:
         try:
-            requests.post(url, json=payload, headers=headers, timeout=30).raise_for_status()
-            return True
-        except requests.RequestException:
-            if attempt < 2:
-                time.sleep(2)
-    return False
+            CALLBACK_OUTBOX.deliver_due(_post_callback)
+        except Exception as exc:
+            print(f"[callback-outbox] 回调重试失败: {exc}")
+        time.sleep(5)
 
 
 def execute(payload: dict) -> None:
     job_id = payload["job_id"]
     callback_url = payload.get("callback_url") or LINUX_CALLBACK_URL
     headers = {"X-Worker-Token": WORKER_TOKEN} if WORKER_TOKEN else {}
-    callback_headers = {"X-Worker-Token": CALLBACK_TOKEN} if CALLBACK_TOKEN else {}
     callback_base = callback_url.rsplit("/api/", 1)[0]
     try:
         task_config = _config_for_task(payload.get("proxy") or {}, payload["mode"])
     except Exception as exc:
         for account in payload["accounts"]:
-            _send_callback(callback_url, {"job_id": job_id, "job_item_id": account["job_item_id"],
-                                          "account_id": account["account_id"], "worker_id": WORKER_ID,
-                                          "status": "failed", "error_code": "worker_config_error",
-                                          "error_message": str(exc)}, callback_headers)
+            _queue_callback(callback_url, {"job_id": job_id, "job_item_id": account["job_item_id"],
+                                            "account_id": account["account_id"], "worker_id": WORKER_ID,
+                                            "status": "failed", "error_code": "worker_config_error",
+                                            "error_message": str(exc)})
         return
     for account in payload["accounts"]:
         email, password = account["email"], account["password"]
@@ -118,18 +134,24 @@ def execute(payload: dict) -> None:
                       "error_message": "登录成功但未导出凭证" if callback_error_code == "credentials_missing" else getattr(automation_result, "error_message", None)}
             if callback_status == "success":
                 result.update({"cookie": credentials.cookie, "csrftoken": credentials.csrftoken,
-                               "cookie_expires_at": credentials.cookie_expires_at})
+                               "cookie_expires_at": credentials.cookie_expires_at,
+                               "credential_updated_at": credentials.credential_updated_at or datetime.now(timezone.utc).isoformat()})
         except Exception as exc:
             result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
         finally:
             heartbeat_stop.set()
         if callback_url:
-            _send_callback(callback_url, result, callback_headers)
+            _queue_callback(callback_url, result)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+def start_callback_retry_loop() -> None:
+    threading.Thread(target=_callback_retry_loop, daemon=True, name="callback-outbox").start()
 
 
 @app.post("/worker/register")

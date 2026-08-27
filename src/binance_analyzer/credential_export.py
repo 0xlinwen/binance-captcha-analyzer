@@ -13,6 +13,7 @@ class CredentialSnapshot:
     cookie: str
     csrftoken: str | None
     cookie_expires_at: str | None
+    credential_updated_at: str | None = None
 
 
 def export_credentials(page: Any, *, include_expiry: bool = True) -> CredentialSnapshot:
@@ -24,4 +25,4 @@ def export_credentials(page: Any, *, include_expiry: bool = True) -> CredentialS
     csrftoken = hashlib.md5(values["cr00"].encode()).hexdigest() if values.get("cr00") else values.get("csrftoken")
     expires = [c.get("expires") for c in binance_cookies if c.get("expires")]
     cookie_expires_at = datetime.fromtimestamp(min(expires), timezone.utc).isoformat() if include_expiry and expires else None
-    return CredentialSnapshot(cookie, csrftoken, cookie_expires_at)
+    return CredentialSnapshot(cookie, csrftoken, cookie_expires_at, datetime.now(timezone.utc).isoformat())
