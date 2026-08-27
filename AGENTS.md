@@ -2,37 +2,13 @@
 
 ## 项目目标与当前进展
 
-- 目标：自动化处理 Binance 登录/注册流程，包含浏览器自动化、验证码识别、邮箱验证码提取、代理运行时和结果持久化。
-- 当前进展：主流程已按入口层、编排层、登录/注册流程、动作/验证码/邮箱/存储能力模块拆分；代理能力已抽为 `src/proxy_forwarder` 可复用包。
-- 下一步：继续拆分 `email_imap.py` 和 `src/proxy_forwarder/runtime.py` 中的大函数，优先提取类级抽象；真实登录复测创作者中心 API 提取仍待安排。
-- 最近完成：文件锁已改为 `src/binance_analyzer/file_lock.py` + `portalocker`，账号存储、代理 IP 存储、注册账号存储和创作者 API 配额均不再直接依赖 Unix-only 的 `fcntl`，Windows/macOS 共用同一实现。
-- 最近完成：登录/注册成功后的 Dashboard 判定改为使用 `page_signals.is_dashboard_url()`；Creator API 入口点击后会等待导航并切换到新打开的 tab，避免在旧页面读取密钥。
-- 最近实测：2026-08-20 真实登录 `accounts.txt` 中的 2 个账号均通过邮箱 MFA 并写入 Cookie/CSRF；Creator Center 页面实际按钮文案为“创建 API 密钥”，已加入提取入口选择器。因成功账号已从队列移除，修复后的 API 真实读取尚未复测。
-- 最近修复：Creator API 读取曾把 `Square-Creator-*` 用户名误保存为 `api_key`；现改为仅读取明确 API key 语义的字段，找不到时保存 `artifacts/debug/creator_api/` 截图与文本并失败，不再从整页文本猜值。已清理历史凭证中的错误 API 字段。
-- 最近实测：2026-08-20 对 `tommimjr0@outlook.com` 执行真实登录时，在登录页滑块验证码阶段被弹窗拦截，流程返回 `AUTH_FAILED`，未进入 Creator Center，未生成 API 调试截图；账号已写入失败结果，需重新加入待处理队列后再测。
-- 最近修复：创作者中心进页后无点击、弹窗已有密钥仍失败。入口「查看 API >」无法 exact 匹配；新手引导层会挡住点击；密钥是「API 密钥」标签后的纯文本而不是 input。提取器改为包含匹配、先关引导、禁止 `networkidle` 空等，并按标签读取密钥。真实页面点击尚未复测。
-- 最近完成：提取 API 密钥后同时读取资料卡展示名称（`@Square-Creator-` 前方的 display_name，例如 `Alan Searchfield diwl`），写入 `registered_accounts.json` 的 `display_name`。找不到名称时密钥仍保存，display_name 留空。
-- 最近完成：抽完 API key 后点击「编辑」，从「编辑个人资料」读取「昵称」写入 `display_name`、「用户名」写入 `username`，然后点取消关闭，不改资料。
-- 最近完成：新增 `src/binance_cloud/` 实验性 SQLite 云端 API 与 Windows Worker 入口；Linux 创建登录任务并异步 POST 给 Windows，Windows 复用 `register_account`，每个账号完成后回调 Linux；Cookie 额外记录 `cookie_expires_at`，SQLite 长字段使用 `TEXT`。
-- 最近完成：云端服务保留可选 Worker/回调 Token 校验（默认未配置时放行），并增加 Worker 注册与执行心跳、任务租约超时回收、固定代理任务计数和回调重试；新增任务取消、数据库备份、日志清理、SQLite WAL 和部署模板。
-- 最近完成：Worker 任务已传递 `client_id`/`refresh_token`；按需求移除 Cookie 在线检查逻辑、接口、模块、数据库状态字段和测试，Cookie 仍仅在登录成功时保存并保留 `cookie_expires_at`。
-- 最近完成：云端任务状态收敛到数据库层，Worker 心跳续租、租约/调度失败终态统计、取消后的迟到回调忽略；新增 `src/binance_cloud/protocols.py` 强类型执行/回调协议，回调 Token 可独立配置，Worker 取消后停止后续账号。155 项测试通过。
-- 最近完成：全局批量任务使用 `task_groups` 统一统计；Lark Webhook 从 Linux `config/cloud.json` 的 `lark.webhook_url` 读取，单账号不通知，连续 5 个失败和全局完成各通知一次。维护线程会补发无回调（如代理配额超限）任务组通知，通知异常不会影响回调落库。159 项测试通过。
-- 最近完成：Windows Worker 支持 `worker_max_workers` 受控并发，同一 HTTP 任务按账号拆分线程执行；Lark 通知仅在发送成功后标记已发送，失败可由维护线程再次尝试。配置模板已补充并发参数。
-- 最近完成：云端任务支持 `idempotency_key` 幂等创建；批量提交命令支持 `--timeout-seconds` 整体等待超时。全量 161 项测试通过。
-- 最近完成：Linux/Windows 的协议版本均从角色配置读取；Linux 派发前检查 Windows `/health` 协议版本，任务请求必须携带版本，Windows 不匹配即拒绝执行。162 项测试通过。
-- 最近完成：Worker 协议版本不兼容时，Linux 按任务组/任务幂等键发送一次 Lark 系统告警；未配置 Webhook 时错误仍写入任务明细和执行日志，不影响现有重试流程。162 项测试通过。
-- 最近完成：配置按角色拆分到 `config/automation.json`、`config/worker.json`、`config/cloud.json`；协议版本、Worker ID、并发和调试开关归 Worker，数据库/回调/Lark 归 Cloud，自动化参数归 automation。Linux/Windows 业务配置不再接受旧环境变量或根目录配置回退，缺失字段直接报错。README 和部署脚本已同步启动路径。
-- 最近完成：根目录 `config.json` 的自动化字段已逐字段同步到 `config/automation.json`；本地 CLI 与 Windows Worker 均只读取该自动化配置，根目录文件仅保留作迁移核对。运行文件按 `data/accounts`、`data/results`、`data/runtime` 分类，调试证据写入 `artifacts/debug`；相对路径均相对各自机器的项目根目录解析。
-- 最近完成：自动化配置已移除 Worker 专属 `debug_mode` 和无效的 `mode_inf`；Windows Worker 不再把 `worker.json` 合并进自动化配置，`debug_mode`、`worker_max_workers` 只从 Worker 配置读取。修复正式模式查询任务状态时引用未定义请求头的问题。
-- 最近完成：Creator API 调试证据和本地失败日志均绑定调用传入的项目根目录，不再依赖启动时当前目录；凭证 JSON 损坏时保存 `.corrupt.*` 副本后立即报错，不再清空内容继续写入。164 项测试通过。
-- 最近完成：任务组 Lark 告警和完成通知使用 SQLite 通知事件键去重；回调线程与维护线程并发触发时只发送一次，Webhook 失败会释放事件键以便后续重试。邮件演示与自动化配置示例统一使用 `data/accounts/pending.txt`，`mode_options` 仅用于人工复制。164 项测试通过。
-- 最近完成：Worker 账号执行线程池提升为进程内全局池，`worker_max_workers` 约束同一 Windows 的全部任务总并发；批量客户端超时时会取消已提交子任务。单账号批量提交不创建任务组、不发送 Lark 通知。162 项测试通过。
-- 最近实测：2026-08-26 本机 Cloud API -> Worker -> Binance 登录 -> 回调闭环成功；MFA、Cookie/CSRF 均成功保存。发现并修复任务失败统计 SQL 将 success 重复计入 failed 的问题；Creator Center API 提取仍可能失败但不影响登录 Cookie 保存。
-- 最近完成：新增 `credential_export.py` 统一导出 Cookie/CSRF/过期时间，新增 `automation_driver.py` 最小驱动协议和 `AutomationResult` 结果载体；注册状态机增加企业注册页识别与返回个人注册；未引入会话二次验证、后台 Cookie 检查、加密/3 天删除或新测试体系。
-- 最近完成：`orchestrator.register_account()`、CLI 与 Windows Worker 已统一使用 `AutomationResult`；凭证通过 `credentials` 载体进入回调，Worker 不再依赖 `result_sink` 传递 Cookie。旧式返回值仅在 CLI/Worker 边界做兼容读取。修复 Worker 任务模式被代理模式覆盖的问题，并补充配置校验测试。本地 CLI 支持 `--count N` 限制本次处理账号数；云端代理失败、限流和可重试回调会按明细重试次数重新入队，耗尽后才标记失败。Windows 回调采用 `data/runtime/callback_outbox.json` 持久队列并退避重试；凭证带更新时间，Linux 拒绝旧回调覆盖重登后的新 Cookie。
-- 最近完成：批量任务改为创建 Linux `task_groups`，多个子 job 共享全局统计；Lark Webhook 从 Linux `config/cloud.json` 的 `lark.webhook_url` 读取，连续 5 个失败和全局完成各通知一次，单账号任务不通知。159 项测试通过。
-- 最近完成：云端 `JobIn.mode` 与 Worker payload 已支持 `login/register`，Windows Worker 按任务覆盖本地 mode，可并行执行两种独立流程；并发任务的浏览器 Worker ID 改为 job/item 唯一值，避免缓存目录冲突。全量 155 项测试通过。
+- 目标：自动化 Binance 登录/注册，支持浏览器自动化、验证码和邮箱 MFA、代理、Cookie/CSRF 导出，以及 Linux Cloud -> Windows Worker 的远程任务闭环。
+- 当前进展：本地 CLI、Windows Worker、Linux Cloud 三个入口均可运行；本地和 Windows 共用 `config/automation.json`，Cloud 使用 SQLite 保存任务、日志和凭证。2026-08-26 已实测本机 Cloud -> Worker -> 登录 -> 回调闭环，MFA、Cookie 和 CSRF 已写入 Cloud 数据库。
+- 当前欠账：Creator Center 的真实 API 密钥提取在最近一次成功登录后的页面上尚未复测；它失败不会影响登录 Cookie 保存。未实现后台 Cookie 在线检查、会话二次验证、加密和按天删除 Cookie，均为明确未纳入范围的能力。
+- 最近验证：`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'` 于当前工作区通过 164 项；`PYTHONPATH=src python3 -m compileall -q src tests demo` 和 `git diff --check` 通过。
+- 配置与运行文件：配置按 `automation.json`、`worker.json`、`cloud.json` 分角色拆分，无根目录 `config.json` 回退。相对运行路径均相对各自项目根目录：账号队列在 `data/accounts/`，本地结果在 `data/results/`，运行状态在 `data/runtime/`，调试证据在 `artifacts/debug/`。
+- 最近完成：Cloud 在任意工作目录启动时仍从项目根目录读取 `config/cloud.json` 和解析相对 SQLite 路径；Windows 回调 Outbox 位于 `data/runtime/callback_outbox.json`。任务组 Lark 告警和完成通知通过 SQLite 事件键去重，失败会在后续维护周期重试。
+- 文档：README 已描述 Cloud/Worker/SQLite/回调/Lark 闭环、三份配置的职责与回调方向、协议版本、Worker ID/并发、Linux 监听与反向代理前提，以及 Windows 部署路径模板。
 
 ## 架构约定
 
@@ -43,7 +19,7 @@
 - `src/binance_analyzer/flows.py`：登录/注册流程共享状态机工具和页面状态辅助函数。
 - `src/binance_analyzer/login_flow.py`：登录 URL 状态机。
 - `src/binance_analyzer/register_flow.py`：注册 URL 状态机。
-- `src/binance_analyzer/results.py`：账号处理状态的唯一来源。入口层、编排层和公开流程函数只传递 `AccountStatus`。
+- `src/binance_analyzer/results.py`：账号状态枚举 `AccountStatus` 的唯一来源；`automation_driver.py` 的 `AutomationResult` 统一承载状态、错误和登录凭证，供 CLI 与 Windows Worker 使用。
 - `src/binance_analyzer/page_signals.py`：URL 状态、风控、代理失败、认证失败等页面信号检测的唯一来源。
 - `src/binance_analyzer/captcha/`：验证码库包。`types.py` 定义类型，`detector.py` 识别页面类型，`prompts.py` 维护 AI 提示词，`ai_client.py` 封装 OpenRouter 请求，`solvers.py` 注册各类型 solver，`service.py` 提供求解主循环。
 - `src/binance_analyzer/account_storage.py`：账号队列与成功/失败账号结果文件。
@@ -53,7 +29,7 @@
 - `src/binance_analyzer/creator_api_quota.py`：单次运行 API 提取名额，失败释放、成功占用。
 - `src/binance_analyzer/screenshot_storage.py`：截图清理。
 - `src/proxy_forwarder/`：代理解析、质量检查、本地转发和运行时管理的可复用包；`proxy_utils.py` 放纯代理解析/格式化工具，业务代码通过 `proxy_integration.py` 适配。
-- `src/binance_cloud/`：SQLite 数据库、Linux FastAPI 接口和 Windows 执行服务；服务入口目前为实验性 MVP，生产 HTTPS、真实 Binance 在线检查和双机联调仍待验收。
+- `src/binance_cloud/`：SQLite 数据库、Linux FastAPI 接口和 Windows 执行服务；本机 Cloud -> Worker -> 回调已实测。公网 HTTPS、端口放行和反向代理由部署环境负责；不提供 Cookie 在线检查。
 
 ## 常用命令
 
@@ -77,7 +53,7 @@ python main.py --refresh-cache
 
 ## 重要技术决策
 
-- 账号状态使用 `AccountStatus` 统一建模，进程池边界也传递枚举值，不保留 `True/False/字符串` 结果协议。
+- 流程状态使用 `AccountStatus` 统一建模；编排完成后统一返回 `AutomationResult`，其中包含状态、错误和可回调的 Cookie/CSRF 凭证。
 - `rate_limited` 代表 IP/代理会话失败，应允许入口层重建代理重试；最终仍失败时再计入风控限制。
 - `proxy_failed` / `rate_limited` 属于环境或代理会话问题，不能写入失败账号文件，也不能从账号队列移除。
 - 页面登录态判断必须解析 URL 的 hostname/path，不使用整串包含判断，避免 `return_to=/my/dashboard` 这类 query 参数误判。
@@ -90,7 +66,7 @@ python main.py --refresh-cache
 - 新增验证码类型时，直接扩展 `src/binance_analyzer/captcha/`：新增 `CaptchaType`、提示词模板、检测规则、对应 solver，并注册到 `build_default_solver_registry()`。验证码求解结果使用 `CaptchaSolveStatus`，由流程层映射到账号状态。
 - 主流程浏览器改为本机 Google Chrome（`get_local_chrome_path()`），不再使用 Playwright 自带 Chromium；找不到 Chrome 时 fail-fast，禁止静默回退。
 - 创作者中心 API 提取由 `creator_api.enabled` 开关控制，`creator_api.max_accounts` 限制单次运行前 N 个账号；结果写入 `registered_accounts.json` 的 `api_key`、`api_extracted_at` 与 `display_name` 字段，默认关闭。
-- `creator_api.max_accounts` 表示单次运行累计成功提取的 API 数，不限制登录/注册账号数量；并发任务通过输出目录配额状态文件协调，提取失败会释放名额供后续成功账号补位。
+- `creator_api.max_accounts` 表示单次运行累计成功提取的 API 数，不限制登录/注册账号数量；并发任务通过 `data/runtime/creator_api_quota.json` 协调配额，提取失败会释放名额供后续成功账号补位。
 
 ## 踩坑记录
 
@@ -104,7 +80,7 @@ python main.py --refresh-cache
 
 - 现象：Windows 原生 Python 启动时提示 `ModuleNotFoundError: No module named 'fcntl'`，`pip install fcntl` 无可用发行版。
   原因：`fcntl` 是 Unix 标准库模块，不支持 Windows。
-  解决方案：统一通过 `file_lock.py` 调用 `portalocker`，保留共享锁/排他锁语义；完整测试在 macOS 环境 149 项通过。
+  解决方案：统一通过 `file_lock.py` 调用 `portalocker`，保留共享锁/排他锁语义。
 
 - 现象：配置错误或页面结构变化时，流程可能继续走宽泛兜底，导致看似运行、实际状态不可控。
   原因：旧代码存在直连预热、未知 mode 回退、宽泛输入框、JS 隐藏弹窗等降级路径。
