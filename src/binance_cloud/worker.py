@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -14,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Header
 from binance_analyzer.config import load_config
 from binance_analyzer.orchestrator import register_account
 from .callback_outbox import CallbackOutbox
-from .protocols import ExecuteLoginPayload
+from .protocols import ExecuteLoginPayload, PROTOCOL_VERSION
 
 
 app = FastAPI(title="Binance Login Windows Worker")
@@ -25,6 +26,9 @@ WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", WORKER_TOKEN)
 WORKER_ID = os.getenv("BINANCE_WORKER_ID", "windows-01")
 CALLBACK_OUTBOX = CallbackOutbox(BASE_DIR / "output" / "callback_outbox.json")
+ACCOUNT_EXECUTOR: ThreadPoolExecutor | None = None
+ACCOUNT_EXECUTOR_SIZE: int | None = None
+ACCOUNT_EXECUTOR_LOCK = threading.Lock()
 
 
 def _config_for_task(proxy: dict, mode: str) -> dict:
@@ -54,6 +58,17 @@ def _config_for_task(proxy: dict, mode: str) -> dict:
     config["proxy"] = configured
     config["mode"] = task_mode
     return config
+
+
+def _account_executor(max_workers: int) -> ThreadPoolExecutor:
+    global ACCOUNT_EXECUTOR, ACCOUNT_EXECUTOR_SIZE
+    with ACCOUNT_EXECUTOR_LOCK:
+        if ACCOUNT_EXECUTOR is None:
+            ACCOUNT_EXECUTOR = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="account")
+            ACCOUNT_EXECUTOR_SIZE = max_workers
+        elif ACCOUNT_EXECUTOR_SIZE != max_workers:
+            raise ValueError("worker_max_workers 只能在 Worker 启动前配置")
+        return ACCOUNT_EXECUTOR
 
 
 def _post_callback(url: str, payload: dict) -> bool:
@@ -95,7 +110,17 @@ def execute(payload: dict) -> None:
                                             "status": "failed", "error_code": "worker_config_error",
                                             "error_message": str(exc)})
         return
-    for account in payload["accounts"]:
+    accounts = payload["accounts"]
+    if len(accounts) > 1 and not payload.get("_parallelized"):
+        max_workers = int(task_config.get("worker_max_workers", 1))
+        if max_workers <= 0:
+            raise ValueError("worker_max_workers 必须是正整数")
+        executor = _account_executor(max_workers)
+        futures = [executor.submit(execute, {**payload, "accounts": [account], "_parallelized": True}) for account in accounts]
+        for future in futures:
+            future.result()
+        return
+    for account in accounts:
         email, password = account["email"], account["password"]
         if account.get("client_id") and account.get("refresh_token") and "----" not in password:
             password = f"{password}----{account['client_id']}----{account['refresh_token']}"
@@ -146,7 +171,7 @@ def execute(payload: dict) -> None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "worker_id": WORKER_ID, "protocol_version": PROTOCOL_VERSION}
 
 
 @app.on_event("startup")
@@ -167,6 +192,8 @@ def register():
 def execute_login(payload: ExecuteLoginPayload, x_worker_token: str | None = Header(default=None)):
     if WORKER_TOKEN and x_worker_token != WORKER_TOKEN:
         raise HTTPException(401, "Worker token 无效")
+    if payload.protocol_version != PROTOCOL_VERSION:
+        raise HTTPException(409, f"Worker 协议版本不兼容: worker={PROTOCOL_VERSION}, request={payload.protocol_version}")
     value = payload.model_dump()
     threading.Thread(target=execute, args=(value,), daemon=True).start()
     return {"job_id": payload.job_id, "status": "accepted"}
