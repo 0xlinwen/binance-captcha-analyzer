@@ -3,10 +3,10 @@ import random
 import time
 from datetime import datetime
 
-from .captcha.service import CaptchaService
-from .captcha.types import CaptchaSolveStatus
-from .email_imap import get_initial_mail_count, get_login_password, handle_email_verification
-from .web_actions import (
+from ..captcha.service import CaptchaService
+from ..captcha.types import CaptchaSolveStatus
+from ..integrations.email_imap import get_initial_mail_count, get_login_password, handle_email_verification
+from ..automation.web_actions import (
     click_button,
     click_register_continue_strict,
     click_login_continue_strict,
@@ -15,9 +15,9 @@ from .web_actions import (
     input_password,
     need_register,
 )
-from .logger import get_logger_manager
-from .utils import wait_for_url_change
-from .constants import (
+from ..runtime.logger import get_logger_manager
+from ..utils import wait_for_url_change
+from ..constants import (
     MAX_CAPTCHA_FAILS,
 )
 from .page_signals import (
@@ -33,7 +33,7 @@ from .page_signals import (
     is_dashboard_url,
     is_logged_in_url,
 )
-from .results import AccountStatus
+from ..results import AccountStatus
 
 
 # URL 状态机最大迭代次数

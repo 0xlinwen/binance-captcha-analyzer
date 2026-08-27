@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from binance_analyzer.account_storage import (
+from binance_analyzer.storage.account_storage import (
     append_account_result,
     load_accounts,
     remove_account_from_file,
 )
-from binance_analyzer.proxy_ip_storage import append_used_proxy_ip, load_used_proxy_ips
-from binance_analyzer.registered_account_storage import save_registered_account
+from binance_analyzer.storage.proxy_ip_storage import append_used_proxy_ip, load_used_proxy_ips
+from binance_analyzer.storage.registered_account_storage import save_registered_account
 
 
 class StorageTests(unittest.TestCase):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .login_flow import login_with_url_state
-from .register_flow import register_with_url_state
-from .results import AccountStatus, AutomationResult
+from ..flows.login_flow import login_with_url_state
+from ..flows.register_flow import register_with_url_state
+from ..results import AccountStatus, AutomationResult
 
 
 class AutomationDriver(Protocol):

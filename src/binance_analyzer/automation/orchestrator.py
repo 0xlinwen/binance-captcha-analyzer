@@ -6,10 +6,10 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from .automation_driver import build_driver
-from .proxy_ip_storage import append_used_proxy_ip, load_used_proxy_ips
-from .registered_account_storage import save_registered_account
-from .local_cache import init_cache_manager
-from .fingerprint import generate_fingerprint
+from ..storage.proxy_ip_storage import append_used_proxy_ip, load_used_proxy_ips
+from ..storage.registered_account_storage import save_registered_account
+from ..runtime.local_cache import init_cache_manager
+from ..fingerprint import generate_fingerprint
 from .cache_routes import handle_cache_route, track_cache_response
 from .browser_context import (
     build_stealth_context,
@@ -17,19 +17,19 @@ from .browser_context import (
     cleanup_subprocess_browser,
     get_launch_args,
 )
-from .proxy_integration import (
+from ..integrations.proxy_integration import (
     build_proxy_launch_config,
     create_proxy_runtime,
     describe_proxy_runtime,
     make_proxy_logger,
     stop_managed_proxy_runtime,
 )
-from .results import AccountStatus, AutomationResult
-from .page_signals import is_dashboard_url
-from .creator_api import api_metadata, extract_creator_api
-from .creator_api_quota import acquire_creator_api_slot, release_creator_api_slot
-from .credential_export import export_credentials
-from .logger import get_logger_manager
+from ..results import AccountStatus, AutomationResult
+from ..flows.page_signals import is_dashboard_url
+from ..integrations.creator_api import api_metadata, extract_creator_api
+from ..integrations.creator_api_quota import acquire_creator_api_slot, release_creator_api_slot
+from ..storage.credential_export import export_credentials
+from ..runtime.logger import get_logger_manager
 
 PAGE_TIMEOUT = 60000
 DEFAULT_USED_PROXY_IPS_FILE = "data/runtime/used_proxy_ips.txt"

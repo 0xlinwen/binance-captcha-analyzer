@@ -11,14 +11,14 @@ from contextlib import contextmanager
 
 import requests
 
-from .constants import (
+from ..constants import (
     IMAP_RETRY_COUNT,
     IMAP_CONNECTION_TIMEOUT_SEC,
     IMAP_FETCH_TIMEOUT_SEC,
 )
-from .utils import retry_with_backoff
-from .web_actions import _human_clear_input
-from .exceptions import (
+from ..utils import retry_with_backoff
+from ..automation.web_actions import _human_clear_input
+from ..exceptions import (
     IMAPAuthFailed,
     IMAPConnectionError,
     IMAPTimeout,

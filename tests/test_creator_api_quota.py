@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from binance_analyzer.creator_api_quota import (
+from binance_analyzer.integrations.creator_api_quota import (
     acquire_creator_api_slot,
     initialize_creator_api_quota,
     release_creator_api_slot,

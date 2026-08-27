@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from binance_analyzer.orchestrator import (
+from binance_analyzer.automation.orchestrator import (
     _build_account_proxy_config,
     _is_static_proxy_mode,
     _record_used_proxy_ip,
@@ -82,11 +82,11 @@ class OrchestratorProxyIpTests(unittest.TestCase):
                     },
                 )
 
-    @patch("binance_analyzer.orchestrator.build_stealth_context")
-    @patch("binance_analyzer.orchestrator.build_proxy_launch_config", return_value=None)
-    @patch("binance_analyzer.orchestrator.create_proxy_runtime", return_value=None)
-    @patch("binance_analyzer.orchestrator.generate_fingerprint")
-    @patch("binance_analyzer.orchestrator.sync_playwright")
+    @patch("binance_analyzer.automation.orchestrator.build_stealth_context")
+    @patch("binance_analyzer.automation.orchestrator.build_proxy_launch_config", return_value=None)
+    @patch("binance_analyzer.automation.orchestrator.create_proxy_runtime", return_value=None)
+    @patch("binance_analyzer.automation.orchestrator.generate_fingerprint")
+    @patch("binance_analyzer.automation.orchestrator.sync_playwright")
     def test_register_account_returns_proxy_failed_when_proxy_runtime_missing(
         self,
         mock_sync_playwright,

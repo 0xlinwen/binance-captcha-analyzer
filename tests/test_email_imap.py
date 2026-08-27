@@ -4,7 +4,7 @@ from email.message import EmailMessage
 import unittest
 from unittest.mock import patch
 
-from binance_analyzer import email_imap
+from binance_analyzer.integrations import email_imap
 
 
 class _FakeImapConnection:
@@ -127,7 +127,7 @@ class EmailImapHistoricalLogicTests(unittest.TestCase):
             ),
         ]
 
-        with patch("binance_analyzer.email_imap.imap_connection", return_value=_FakeImapConnection(raw_messages)):
+        with patch("binance_analyzer.integrations.email_imap.imap_connection", return_value=_FakeImapConnection(raw_messages)):
             code = email_imap.get_email_verification_code(
                 "imap.firstmail.ltd",
                 993,
@@ -157,8 +157,8 @@ class EmailImapHistoricalLogicTests(unittest.TestCase):
         account_tail = "real-pass----client-id----refresh-token"
 
         with (
-            patch("binance_analyzer.email_imap.oauth_imap_connection", return_value=_FakeImapConnection(raw_messages)),
-            patch("binance_analyzer.email_imap._fetch_outlook_code_via_api") as fetch_api,
+            patch("binance_analyzer.integrations.email_imap.oauth_imap_connection", return_value=_FakeImapConnection(raw_messages)),
+            patch("binance_analyzer.integrations.email_imap._fetch_outlook_code_via_api") as fetch_api,
         ):
             code = email_imap.get_email_verification_code(
                 "outlook.office365.com",
@@ -176,8 +176,8 @@ class EmailImapHistoricalLogicTests(unittest.TestCase):
         _FakeOAuthImapClient.calls = []
 
         with (
-            patch("binance_analyzer.email_imap._get_oauth_imap_access_token", return_value="access-token"),
-            patch("binance_analyzer.email_imap.imaplib.IMAP4_SSL", _FakeOAuthImapClient),
+            patch("binance_analyzer.integrations.email_imap._get_oauth_imap_access_token", return_value="access-token"),
+            patch("binance_analyzer.integrations.email_imap.imaplib.IMAP4_SSL", _FakeOAuthImapClient),
         ):
             with email_imap.oauth_imap_connection(
                 "imap.firstmail.ltd",
@@ -195,7 +195,7 @@ class EmailImapHistoricalLogicTests(unittest.TestCase):
     def test_outlook_api_ignores_configured_proxy(self) -> None:
         fake_session = _FakeSession()
 
-        with patch("binance_analyzer.email_imap.requests.Session", return_value=fake_session):
+        with patch("binance_analyzer.integrations.email_imap.requests.Session", return_value=fake_session):
             code = email_imap._fetch_outlook_code_via_api(
                 "alice@outlook.com",
                 "pass",
@@ -210,7 +210,7 @@ class EmailImapHistoricalLogicTests(unittest.TestCase):
         self.assertEqual(fake_session.requests[0][1]["params"], {"name": "alice@outlook.com", "pwd": "pass"})
 
     def test_hotmail_account_uses_microsoft_api(self) -> None:
-        with patch("binance_analyzer.email_imap._fetch_outlook_code_via_api", return_value="123456") as fetch_api:
+        with patch("binance_analyzer.integrations.email_imap._fetch_outlook_code_via_api", return_value="123456") as fetch_api:
             code = email_imap.get_email_verification_code(
                 "imap.firstmail.ltd",
                 993,
@@ -235,9 +235,9 @@ class EmailImapHistoricalLogicTests(unittest.TestCase):
         }
 
         with (
-            patch("binance_analyzer.email_imap.requests.Session", return_value=fake_session),
-            patch("binance_analyzer.email_imap.time.time", side_effect=[0, 0, 2, 2]),
-            patch("binance_analyzer.email_imap.time.sleep"),
+            patch("binance_analyzer.integrations.email_imap.requests.Session", return_value=fake_session),
+            patch("binance_analyzer.integrations.email_imap.time.time", side_effect=[0, 0, 2, 2]),
+            patch("binance_analyzer.integrations.email_imap.time.sleep"),
         ):
             code = email_imap._fetch_outlook_code_via_api(
                 "alice@hotmail.com",

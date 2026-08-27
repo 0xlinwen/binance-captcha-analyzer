@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from binance_analyzer.page_signals import (
+from binance_analyzer.flows.page_signals import (
     UrlState,
     assess_risk_text,
     detect_login_url_state,

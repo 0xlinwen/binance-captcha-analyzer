@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from binance_analyzer.creator_api import (
+from binance_analyzer.integrations.creator_api import (
     CREATOR_CENTER_URL,
     CreatorCenterApiExtractor,
     _click_by_texts,
@@ -410,7 +410,7 @@ class ExtractCreatorApiTests(unittest.TestCase):
                 return "ec7d6cea1b1642fa9636ab4035ba8834"
             return ""
 
-        with patch("binance_analyzer.creator_api._read_api_value", side_effect=fake_read):
+        with patch("binance_analyzer.integrations.creator_api._read_api_value", side_effect=fake_read):
             profile = CreatorCenterApiExtractor(page, Path("/tmp/project/artifacts/debug/creator_api")).extract()
 
         self.assertEqual(profile.api_key, "ec7d6cea1b1642fa9636ab4035ba8834")

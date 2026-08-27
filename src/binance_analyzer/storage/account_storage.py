@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .file_lock import lock, unlock
+from ..runtime.file_lock import lock, unlock
 
 
 def parse_account_line(line: str) -> tuple[str, str] | None:

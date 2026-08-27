@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .file_lock import lock, unlock
+from ..runtime.file_lock import lock, unlock
 
 
 def load_used_proxy_ips(base_dir: Path, used_ips_file: str) -> set[str]:

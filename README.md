@@ -124,16 +124,18 @@ src/binance_analyzer/
   __init__.py
   cli.py                               # 主入口、并发调度、信号处理、缓存预热
   config.py                            # 配置加载与默认值
-  orchestrator.py                      # 单账号编排（代理、浏览器、流程、Cookie）
-  automation_driver.py                 # 登录/注册驱动抽象与统一结果封装
-  credential_export.py                 # Cookie、CSRF、过期时间导出
-  browser_context.py                   # 浏览器上下文、反检测脚本、subprocess 启动
-  flows.py                             # 登录/注册共享状态机工具
-  login_flow.py                        # 登录流程状态机
-  register_flow.py                     # 注册流程状态机
   results.py                           # 账号处理状态模型
-  page_signals.py                      # URL、风控、代理失败等页面信号检测
-  web_actions.py                       # 页面交互（输入邮箱/密码、点击按钮、弹窗处理）
+  automation/                          # 浏览器上下文、编排和页面动作
+    orchestrator.py
+    automation_driver.py
+    browser_context.py
+    cache_routes.py
+    web_actions.py
+  flows/                               # 登录/注册状态机和页面信号
+    flows.py
+    login_flow.py
+    register_flow.py
+    page_signals.py
   captcha/                              # 可扩展验证码库
     types.py                            # 验证码类型与上下文
     detector.py                         # 页面验证码类型检测
@@ -141,16 +143,23 @@ src/binance_analyzer/
     ai_client.py                        # OpenRouter AI 调用与 JSON 解析
     solvers.py                          # checkbox/click/slider solver 与注册表
     service.py                          # 验证码求解主循环
-  email_imap.py                        # IMAP 邮件验证码提取 + Outlook API 拉码
-  account_storage.py                   # 账号队列与成功/失败结果文件
-  proxy_ip_storage.py                  # 代理出口 IP 使用记录
-  registered_account_storage.py        # registered_accounts.json 持久化
-  screenshot_storage.py                # 截图清理
-  proxy_integration.py                 # 业务层代理运行时适配
-  local_cache.py                       # 应用层静态资源缓存
-  traffic_monitor.py                   # 流量统计（按类型/域名/请求）
+  integrations/                        # 邮箱、Creator API 和代理集成
+    email_imap.py
+    creator_api.py
+    creator_api_quota.py
+    proxy_integration.py
+  storage/                             # 账号、凭证、代理 IP 和截图存储
+    account_storage.py
+    registered_account_storage.py
+    credential_export.py
+    proxy_ip_storage.py
+    screenshot_storage.py
+  runtime/                             # 锁、日志、缓存和流量运行时
+    file_lock.py
+    logger.py
+    local_cache.py
+    traffic_monitor.py
   fingerprint.py                       # 浏览器指纹随机化（UA/时区/WebGL）
-  logger.py                            # 失败账号详细日志与运行统计
   constants.py                         # 全局常量（超时、重试、日志格式等）
   utils.py                             # 工具函数（重试策略、弹窗处理、文件名清理）
   exceptions.py                        # 自定义异常层级（可重试/不可重试分类）

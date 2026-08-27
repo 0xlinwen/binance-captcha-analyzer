@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from binance_analyzer.web_actions import click_register_continue_strict, input_email, need_register
+from binance_analyzer.automation.web_actions import click_register_continue_strict, input_email, need_register
 
 
 class _FakePage:
@@ -39,8 +39,8 @@ class _NoEmailInputPage:
 
 
 class InputEmailTests(unittest.TestCase):
-    @patch("binance_analyzer.web_actions.dismiss_cookie_popup", return_value=False)
-    @patch("binance_analyzer.web_actions.dismiss_global_modal", return_value=False)
+    @patch("binance_analyzer.automation.web_actions.dismiss_cookie_popup", return_value=False)
+    @patch("binance_analyzer.automation.web_actions.dismiss_global_modal", return_value=False)
     def test_input_email_fails_without_explicit_email_field(self, _mock_modal, _mock_cookie) -> None:
         self.assertFalse(input_email(_NoEmailInputPage(), "alice@example.com"))
 
@@ -77,7 +77,7 @@ class _RegisterButtonPage:
 
 
 class RegisterContinueTests(unittest.TestCase):
-    @patch("binance_analyzer.web_actions.dismiss_global_modal", return_value=False)
+    @patch("binance_analyzer.automation.web_actions.dismiss_global_modal", return_value=False)
     def test_register_continue_skips_google_button(self, _mock_modal) -> None:
         page = _RegisterButtonPage()
 

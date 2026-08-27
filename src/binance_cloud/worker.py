@@ -13,7 +13,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Header
 
 from binance_analyzer.config import load_config
-from binance_analyzer.orchestrator import register_account
+from binance_analyzer.automation.orchestrator import register_account
 from .callback_outbox import CallbackOutbox
 from .protocols import ExecuteLoginPayload
 
