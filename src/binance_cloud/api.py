@@ -18,7 +18,8 @@ from .database import Database
 from .protocols import CallbackPayload
 
 
-_CLOUD_CONFIG_PATH = Path("config/cloud.json")
+BASE_DIR = Path(__file__).resolve().parents[2]
+_CLOUD_CONFIG_PATH = BASE_DIR / "config" / "cloud.json"
 if not _CLOUD_CONFIG_PATH.exists():
     raise FileNotFoundError(f"缺少 Cloud 配置文件: {_CLOUD_CONFIG_PATH}")
 _CLOUD_CONFIG = json.loads(_CLOUD_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -27,7 +28,8 @@ if not isinstance(_CLOUD_CONFIG, dict):
 for _key in ("database_path", "windows_worker_url", "callback_url", "protocol_version", "task_lease_seconds"):
     if _key not in _CLOUD_CONFIG:
         raise ValueError(f"Cloud 配置缺少 {_key}")
-DB_PATH = _CLOUD_CONFIG["database_path"]
+_configured_db_path = Path(_CLOUD_CONFIG["database_path"])
+DB_PATH = _configured_db_path if _configured_db_path.is_absolute() else BASE_DIR / _configured_db_path
 WINDOWS_WORKER_URL = _CLOUD_CONFIG["windows_worker_url"]
 CALLBACK_URL = _CLOUD_CONFIG["callback_url"]
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
@@ -64,14 +66,31 @@ def _notify_once(event_key: str, message: str) -> None:
 
 
 def _notify_task_group(group_id: str) -> None:
+    def send_once(event_key: str, message: str, mark_sent) -> None:
+        if not db.claim_notification_event(event_key):
+            mark_sent(group_id)
+            return
+        try:
+            _notify_lark(message)
+        except Exception:
+            db.release_notification_event(event_key)
+            raise
+        mark_sent(group_id)
+
     if db.claim_task_group_failure_alert(group_id):
         group = db.task_group(group_id) or {}
-        _notify_lark(f"Binance 全局任务连续失败达到 5 个：任务组 {group_id}，失败数 {group.get('failed_count', 0)}")
-        db.mark_task_group_failure_alerted(group_id)
+        send_once(
+            f"task-group-failure:{group_id}",
+            f"Binance 全局任务连续失败达到 5 个：任务组 {group_id}，失败数 {group.get('failed_count', 0)}",
+            db.mark_task_group_failure_alerted,
+        )
     group = db.claim_task_group_completion_notification(group_id)
     if group:
-        _notify_lark(f"Binance 全局任务完成：任务组 {group_id}，总数 {group['total_count']}，成功 {group['success_count']}，失败 {group['failed_count']}")
-        db.mark_task_group_completion_notified(group_id)
+        send_once(
+            f"task-group-completion:{group_id}",
+            f"Binance 全局任务完成：任务组 {group_id}，总数 {group['total_count']}，成功 {group['success_count']}，失败 {group['failed_count']}",
+            db.mark_task_group_completion_notified,
+        )
 LEASE_SECONDS = int(_CLOUD_CONFIG["task_lease_seconds"])
 db = Database(DB_PATH)
 app = FastAPI(title="Binance Login Cloud API")

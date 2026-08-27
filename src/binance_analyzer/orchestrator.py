@@ -29,9 +29,10 @@ from .page_signals import is_dashboard_url
 from .creator_api import api_metadata, extract_creator_api
 from .creator_api_quota import acquire_creator_api_slot, release_creator_api_slot
 from .credential_export import export_credentials
+from .logger import get_logger_manager
 
 PAGE_TIMEOUT = 60000
-DEFAULT_USED_PROXY_IPS_FILE = "output/used_proxy_ips.txt"
+DEFAULT_USED_PROXY_IPS_FILE = "data/runtime/used_proxy_ips.txt"
 CACHE_DIR = Path(__file__).resolve().parents[2] / ".browser_cache"
 MASTER_CACHE_DIR = CACHE_DIR / "master"
 
@@ -277,6 +278,8 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
     browser = None
     proxy_runtime = None
 
+    get_logger_manager(base_dir=base_dir / "logs")
+
     with sync_playwright() as p:
         fingerprint = generate_fingerprint(use_real_profile=False)
         print(
@@ -401,7 +404,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     else:
                         print(f"\n[Worker-{worker_id}] 提取创作者中心 API...")
                         try:
-                            creator_profile = extract_creator_api(page, config, page_timeout=PAGE_TIMEOUT)
+                            creator_profile = extract_creator_api(page, base_dir, page_timeout=PAGE_TIMEOUT)
                             account_data.update(api_metadata(creator_profile))
                             save_registered_account(base_dir, output_file, account_data)
                         except Exception as exc:

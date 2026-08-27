@@ -15,7 +15,7 @@ def _write_config(base_dir: Path, **overrides):
         "imap_host": "imap.example.com",
         "imap_port": 993,
         "accounts_file": "accounts.txt",
-        "output_file": "output/registered_accounts.json",
+        "output_file": "data/results/registered_accounts.json",
         "mode": "login",
         "headless": False,
         "max_workers": 1,
@@ -30,7 +30,7 @@ def _write_config(base_dir: Path, **overrides):
             "click_retry_per_cell": 3,
         },
         "cache": {"enabled": True},
-        "proxy": {"enabled": False, "used_ips_file": "output/used_proxy_ips.txt"},
+        "proxy": {"enabled": False, "used_ips_file": "data/runtime/used_proxy_ips.txt"},
         "runtime": {
             "max_workers_default": 2,
             "retry_delay_min_sec": 20,

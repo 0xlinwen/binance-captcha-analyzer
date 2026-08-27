@@ -38,7 +38,7 @@ def registered_account_identity(account: dict) -> str:
 def save_registered_account(base_dir: Path, output_file: str, account_data: dict) -> None:
     """保存注册账号数据，更新登录字段并完整保留密码。"""
     output_path = base_dir / output_file
-    output_path.parent.mkdir(exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = output_path.with_suffix(".lock")
     account_data = dict(account_data)
     account_identity = registered_account_identity(account_data)
@@ -57,15 +57,12 @@ def save_registered_account(base_dir: Path, output_file: str, account_data: dict
                                 data = loaded
                             else:
                                 data = {"accounts": [loaded] if isinstance(loaded, dict) else []}
-                except Exception:
+                except (OSError, json.JSONDecodeError) as exc:
                     backup_path = output_path.with_suffix(
                         f"{output_path.suffix}.corrupt.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     )
-                    try:
-                        shutil.copy2(output_path, backup_path)
-                    except Exception:
-                        pass
-                    data = {"accounts": []}
+                    shutil.copy2(output_path, backup_path)
+                    raise RuntimeError(f"凭证文件无效，已备份至: {backup_path}") from exc
 
             existing_idx = None
             for index, account in enumerate(data["accounts"]):

@@ -173,6 +173,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     base_dir = Path(__file__).resolve().parents[2]
+    get_logger_manager(base_dir=base_dir / "logs")
     config = load_config(base_dir, "config/automation.json")
     headless = config["headless"]
 
@@ -200,9 +201,9 @@ def main():
     elif not cache_enabled:
         print("本地缓存: 已禁用")
 
-    screenshots_dir = base_dir / "screenshots"
-    output_dir = base_dir / "output"
-    output_dir.mkdir(exist_ok=True)
+    screenshots_dir = base_dir / "artifacts" / "screenshots"
+    output_dir = base_dir / "data" / "results"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     success_file = output_dir / "success_accounts.txt"
     failed_file = output_dir / "failed_accounts.txt"

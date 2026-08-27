@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from binance_analyzer.creator_api import (
@@ -393,7 +394,7 @@ class ExtractCreatorApiTests(unittest.TestCase):
         edit_button = _FakeElement("编辑", on_click=lambda: setattr(page, "edit_open", True))
         page.controls.append(edit_button)
 
-        profile = extract_creator_api(page, {})
+        profile = extract_creator_api(page, Path("/tmp/project"))
 
         self.assertEqual(profile.api_key, "ec7d6cea1b1642fa9636ab4035ba8834")
         self.assertEqual(profile.display_name, "Alan Searchfield diwl")
@@ -410,7 +411,7 @@ class ExtractCreatorApiTests(unittest.TestCase):
             return ""
 
         with patch("binance_analyzer.creator_api._read_api_value", side_effect=fake_read):
-            profile = CreatorCenterApiExtractor(page).extract()
+            profile = CreatorCenterApiExtractor(page, Path("/tmp/project/artifacts/debug/creator_api")).extract()
 
         self.assertEqual(profile.api_key, "ec7d6cea1b1642fa9636ab4035ba8834")
         self.assertEqual(profile.display_name, "")
