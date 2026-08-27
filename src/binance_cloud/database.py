@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS login_job_proxy_usage (
 );
 CREATE TABLE IF NOT EXISTS credentials (
   id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id),
-  cookie TEXT NOT NULL, csrftoken TEXT, cookie_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  cookie TEXT NOT NULL, csrftoken TEXT, cookie_expires_at TEXT, credential_updated_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS execution_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, job_item_id INTEGER, account_id INTEGER,
@@ -77,6 +77,10 @@ class Database:
         for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2")):
             if name not in columns:
                 self.conn.execute(f"ALTER TABLE login_job_items ADD COLUMN {name} {definition}")
+        credential_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(credentials)")}
+        if "credential_updated_at" not in credential_columns:
+            self.conn.execute("ALTER TABLE credentials ADD COLUMN credential_updated_at TEXT")
+            self.conn.execute("UPDATE credentials SET credential_updated_at=updated_at WHERE credential_updated_at IS NULL")
 
     def close(self) -> None:
         self.conn.close()
@@ -286,14 +290,27 @@ class Database:
             now = utc_now()
             if payload.get("account_id") != item["account_id"] or payload.get("job_id") != item["job_id"]:
                 raise ValueError("回调任务明细不匹配")
-            stored_status = "failed" if status in {"proxy_failed", "rate_limited"} else status
-            self.conn.execute("UPDATE login_job_items SET status=?, error_code=?, error_message=?, completed_at=?, lease_expires_at=NULL WHERE id=?",
-                              (stored_status, payload.get("error_code"), payload.get("error_message"), now, item_id))
+            retryable = status in {"retryable", "proxy_failed", "rate_limited"}
+            if retryable:
+                retry_count = item["retry_count"] + 1
+                stored_status = "retryable" if retry_count < item["max_retries"] else "failed"
+                completed_at = now if stored_status == "failed" else None
+                self.conn.execute(
+                    "UPDATE login_job_items SET status=?, error_code=?, error_message=?, retry_count=?, completed_at=?, lease_expires_at=NULL WHERE id=?",
+                    (stored_status, payload.get("error_code"), payload.get("error_message"), retry_count, completed_at, item_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE login_job_items SET status=?, error_code=?, error_message=?, completed_at=?, lease_expires_at=NULL WHERE id=?",
+                    (status, payload.get("error_code"), payload.get("error_message"), now, item_id),
+                )
             if status == "success" and payload.get("cookie"):
-                self.conn.execute("""INSERT INTO credentials(account_id,cookie,csrftoken,cookie_expires_at,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET cookie=excluded.cookie,csrftoken=excluded.csrftoken,
-                    cookie_expires_at=excluded.cookie_expires_at,updated_at=excluded.updated_at""",
-                    (item["account_id"], payload["cookie"], payload.get("csrftoken"), payload.get("cookie_expires_at"), now, now))
+                credential_updated_at = payload.get("credential_updated_at") or now
+                self.conn.execute("""INSERT INTO credentials(account_id,cookie,csrftoken,cookie_expires_at,credential_updated_at,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET cookie=excluded.cookie,csrftoken=excluded.csrftoken,
+                    cookie_expires_at=excluded.cookie_expires_at,credential_updated_at=excluded.credential_updated_at,updated_at=excluded.updated_at
+                    WHERE excluded.credential_updated_at >= credentials.credential_updated_at""",
+                    (item["account_id"], payload["cookie"], payload.get("csrftoken"), payload.get("cookie_expires_at"), credential_updated_at, now, now))
             if item.get("proxy_address"):
                 self.conn.execute("""UPDATE login_job_proxy_usage SET success_count=success_count+?,failed_count=failed_count+?,last_assigned_at=? WHERE job_id=? AND proxy_address=?""",
                     (1 if status == "success" else 0, 0 if status == "success" else 1, now, item["job_id"], item["proxy_address"]))

@@ -384,6 +384,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     "cookie":           cookie_string,
                     "csrftoken":        csrftoken,
                     "cookie_expires_at": cookie_expires_at,
+                    "credential_updated_at": credentials.credential_updated_at,
                     "enabled":          True,
                     "avatar_changed":   False,
                     "nickname_changed": False,
