@@ -2,6 +2,41 @@
 
 Binance 登录/注册自动化工具，基于 Playwright 浏览器自动化 + OpenRouter AI 验证码识别 + IMAP 邮箱验证码提取。
 
+## 服务快速启动
+
+### Linux Cloud API
+
+在 Linux 代码库根目录执行：
+
+```bash
+source .venv/bin/activate
+export PYTHONPATH="$PWD/src"
+python -m uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8001
+```
+
+启动前确认 `config/cloud.json` 已配置完成。端口 `8001` 是当前云端回调端口；如改用其他端口，必须同步修改 Worker 的回调地址和防火墙规则。启动后检查：
+
+```bash
+curl http://127.0.0.1:8001/health
+```
+
+### Windows Worker
+
+在代码库根目录打开 PowerShell，执行：
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+$env:BINANCE_WORKER_BASE_DIR = "$PWD"
+
+python -m uvicorn binance_cloud.worker:app --host 0.0.0.0 --port 8100
+```
+
+启动前确认 `config/automation.json` 和 `config/worker.json` 已配置完成。启动后可检查：
+
+```powershell
+curl http://127.0.0.1:8100/health
+```
+
 ## 核心功能
 
 - 自动登录/注册 Binance 账号
@@ -32,7 +67,7 @@ Windows Worker（src/binance_cloud/worker.py）
         │ worker_max_workers 控制整台节点的账号并发
         ▼
 浏览器自动化（register_account）
-  登录/注册 -> 邮箱 MFA -> 导出 Cookie / CSRF / 过期时间
+  登录/注册 -> 邮箱 MFA -> 导出 Cookie / CSRF / 导出时间
         │ POST /api/worker/callback
         │ 失败时持久化到 data/runtime/callback_outbox.json 后重试
         ▼
@@ -161,12 +196,12 @@ python -m pip install -r requirements-server.txt
 Linux 云端启动 API：
 
 ```bash
-PYTHONPATH=src uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8000
+PYTHONPATH=src uvicorn binance_cloud.api:app --host 0.0.0.0 --port 8001
 ```
 
 Linux 的业务配置统一写在 `config/cloud.json`（数据库路径、Windows Worker 地址、回调地址、协议版本、租约时长和 Lark Webhook）。数据库父目录需由运行用户具备写权限。鉴权仍可按需通过 `BINANCE_WORKER_TOKEN`、`BINANCE_CALLBACK_TOKEN` 启用。
 
-直接对公网暴露 API 时使用上面的 `--host 0.0.0.0`。`deploy/linux/binance-cloud.service` 为反向代理部署准备，默认只监听 `127.0.0.1:8000`；使用该模板时必须由 Nginx/Caddy 等反向代理把公网域名转发到该地址。不要在只监听 `127.0.0.1` 的情况下直接使用 `http://Linux公网IP:8000`。
+直接对公网暴露 API 时使用上面的 `--host 0.0.0.0`。`deploy/linux/binance-cloud.service` 为反向代理部署准备，模板默认监听 `127.0.0.1:8000`；如果使用该模板，需由 Nginx/Caddy 将公网回调地址转发到该端口，并同步修改 `config/cloud.json` 的回调地址。不要在只监听 `127.0.0.1` 的情况下直接使用 Linux 公网 IP 访问。
 
 Windows 启动执行服务（需在 Worker 目录准备 `config/automation.json` 和 `config/worker.json`）：
 
