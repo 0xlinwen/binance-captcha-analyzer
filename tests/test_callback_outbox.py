@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from binance_cloud.callback_outbox import CallbackOutbox
+from binance_cloud.windows.callback_outbox import CallbackOutbox
 
 
 class CallbackOutboxTests(unittest.TestCase):

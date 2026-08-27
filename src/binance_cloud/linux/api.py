@@ -15,10 +15,10 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from .database import Database
-from .protocols import CallbackPayload
+from ..shared.protocols import CallbackPayload
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parents[3]
 _CLOUD_CONFIG_PATH = BASE_DIR / "config" / "cloud.json"
 if not _CLOUD_CONFIG_PATH.exists():
     raise FileNotFoundError(f"缺少 Cloud 配置文件: {_CLOUD_CONFIG_PATH}")

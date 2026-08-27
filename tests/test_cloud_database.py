@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from binance_cloud.database import Database
+from binance_cloud.linux.database import Database
 
 
 class CloudDatabaseTests(unittest.TestCase):

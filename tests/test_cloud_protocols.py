@@ -1,6 +1,6 @@
 import unittest
 
-from binance_cloud.protocols import ExecuteLoginPayload
+from binance_cloud.shared.protocols import ExecuteLoginPayload
 
 
 class CloudProtocolTests(unittest.TestCase):
