@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-from binance_analyzer import login_flow, register_flow
+from binance_analyzer.flows import login_flow, register_flow
 from binance_analyzer.results import AccountStatus
 
 
@@ -27,12 +27,12 @@ def _config() -> dict:
 
 
 class InitialPageFailureTests(unittest.TestCase):
-    @patch("binance_analyzer.login_flow.save_failure_log")
-    @patch("binance_analyzer.login_flow.log_summary")
-    @patch("binance_analyzer.login_flow.goto_with_retry", return_value=False)
-    @patch("binance_analyzer.login_flow.get_initial_mail_count", return_value=0)
-    @patch("binance_analyzer.login_flow.console_log")
-    @patch("binance_analyzer.login_flow.setup_logger")
+    @patch("binance_analyzer.flows.login_flow.save_failure_log")
+    @patch("binance_analyzer.flows.login_flow.log_summary")
+    @patch("binance_analyzer.flows.login_flow.goto_with_retry", return_value=False)
+    @patch("binance_analyzer.flows.login_flow.get_initial_mail_count", return_value=0)
+    @patch("binance_analyzer.flows.login_flow.console_log")
+    @patch("binance_analyzer.flows.login_flow.setup_logger")
     def test_login_initial_page_load_failure_is_proxy_failed(
         self,
         mock_setup_logger,
@@ -48,10 +48,10 @@ class InitialPageFailureTests(unittest.TestCase):
 
         self.assertIs(status, AccountStatus.PROXY_FAILED)
 
-    @patch("binance_analyzer.register_flow.save_failure_log")
-    @patch("binance_analyzer.register_flow.goto_with_retry", return_value=False)
-    @patch("binance_analyzer.register_flow.console_log")
-    @patch("binance_analyzer.register_flow.setup_logger")
+    @patch("binance_analyzer.flows.register_flow.save_failure_log")
+    @patch("binance_analyzer.flows.register_flow.goto_with_retry", return_value=False)
+    @patch("binance_analyzer.flows.register_flow.console_log")
+    @patch("binance_analyzer.flows.register_flow.setup_logger")
     def test_register_initial_page_load_failure_is_proxy_failed(
         self,
         mock_setup_logger,
@@ -66,20 +66,20 @@ class InitialPageFailureTests(unittest.TestCase):
 
         self.assertIs(status, AccountStatus.PROXY_FAILED)
 
-    @patch("binance_analyzer.login_flow.save_failure_log")
-    @patch("binance_analyzer.login_flow._continue_login_after_auth_failure", return_value=False)
-    @patch("binance_analyzer.login_flow._get_body_text", return_value="认证失败，请刷新页面后重试。(208075-838bc7b0)")
-    @patch("binance_analyzer.login_flow._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/login"))
-    @patch("binance_analyzer.login_flow.click_login_continue_strict", return_value=True)
-    @patch("binance_analyzer.login_flow.input_email", return_value=True)
-    @patch("binance_analyzer.login_flow._has_risk_error", return_value=(False, ""))
-    @patch("binance_analyzer.login_flow._is_page_blank", return_value=False)
-    @patch("binance_analyzer.login_flow._wait_for_url_change", return_value=(False, "https://accounts.binance.com/zh-CN/login"))
-    @patch("binance_analyzer.login_flow._CAPTCHA_SERVICE")
-    @patch("binance_analyzer.login_flow.goto_with_retry", return_value=True)
-    @patch("binance_analyzer.login_flow.get_initial_mail_count", return_value=0)
-    @patch("binance_analyzer.login_flow.console_log")
-    @patch("binance_analyzer.login_flow.setup_logger")
+    @patch("binance_analyzer.flows.login_flow.save_failure_log")
+    @patch("binance_analyzer.flows.login_flow._continue_login_after_auth_failure", return_value=False)
+    @patch("binance_analyzer.flows.login_flow._get_body_text", return_value="认证失败，请刷新页面后重试。(208075-838bc7b0)")
+    @patch("binance_analyzer.flows.login_flow._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/login"))
+    @patch("binance_analyzer.flows.login_flow.click_login_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.login_flow.input_email", return_value=True)
+    @patch("binance_analyzer.flows.login_flow._has_risk_error", return_value=(False, ""))
+    @patch("binance_analyzer.flows.login_flow._is_page_blank", return_value=False)
+    @patch("binance_analyzer.flows.login_flow._wait_for_url_change", return_value=(False, "https://accounts.binance.com/zh-CN/login"))
+    @patch("binance_analyzer.flows.login_flow._CAPTCHA_SERVICE")
+    @patch("binance_analyzer.flows.login_flow.goto_with_retry", return_value=True)
+    @patch("binance_analyzer.flows.login_flow.get_initial_mail_count", return_value=0)
+    @patch("binance_analyzer.flows.login_flow.console_log")
+    @patch("binance_analyzer.flows.login_flow.setup_logger")
     def test_login_auth_failure_after_email_submit_is_auth_failed(
         self,
         mock_setup_logger,
@@ -108,12 +108,12 @@ class InitialPageFailureTests(unittest.TestCase):
         self.assertIs(status, AccountStatus.AUTH_FAILED)
         mock_continue_auth_failure.assert_called_once()
 
-    @patch("binance_analyzer.register_flow.handle_email_verification")
-    @patch("binance_analyzer.register_flow._has_risk_error", return_value=(False, ""))
-    @patch("binance_analyzer.register_flow._is_page_blank", return_value=False)
-    @patch("binance_analyzer.register_flow.goto_with_retry", return_value=True)
-    @patch("binance_analyzer.register_flow.console_log")
-    @patch("binance_analyzer.register_flow.setup_logger")
+    @patch("binance_analyzer.flows.register_flow.handle_email_verification")
+    @patch("binance_analyzer.flows.register_flow._has_risk_error", return_value=(False, ""))
+    @patch("binance_analyzer.flows.register_flow._is_page_blank", return_value=False)
+    @patch("binance_analyzer.flows.register_flow.goto_with_retry", return_value=True)
+    @patch("binance_analyzer.flows.register_flow.console_log")
+    @patch("binance_analyzer.flows.register_flow.setup_logger")
     def test_register_stops_at_verification_when_email_fetch_disabled(
         self,
         mock_setup_logger,
@@ -136,17 +136,17 @@ class InitialPageFailureTests(unittest.TestCase):
         self.assertIs(status, AccountStatus.EMAIL_VERIFICATION_REQUIRED)
         mock_handle_email_verification.assert_not_called()
 
-    @patch("binance_analyzer.register_flow.handle_email_verification")
-    @patch("binance_analyzer.register_flow._CAPTCHA_SERVICE")
-    @patch("binance_analyzer.register_flow._wait_for_page_response")
-    @patch("binance_analyzer.register_flow.click_register_continue_strict", return_value=True)
-    @patch("binance_analyzer.register_flow._tick_agreement_checkbox", return_value=True)
-    @patch("binance_analyzer.register_flow.input_email", return_value=True)
-    @patch("binance_analyzer.register_flow._has_risk_error", return_value=(False, ""))
-    @patch("binance_analyzer.register_flow._is_page_blank", return_value=False)
-    @patch("binance_analyzer.register_flow.goto_with_retry", return_value=True)
-    @patch("binance_analyzer.register_flow.console_log")
-    @patch("binance_analyzer.register_flow.setup_logger")
+    @patch("binance_analyzer.flows.register_flow.handle_email_verification")
+    @patch("binance_analyzer.flows.register_flow._CAPTCHA_SERVICE")
+    @patch("binance_analyzer.flows.register_flow._wait_for_page_response")
+    @patch("binance_analyzer.flows.register_flow.click_register_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._tick_agreement_checkbox", return_value=True)
+    @patch("binance_analyzer.flows.register_flow.input_email", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._has_risk_error", return_value=(False, ""))
+    @patch("binance_analyzer.flows.register_flow._is_page_blank", return_value=False)
+    @patch("binance_analyzer.flows.register_flow.goto_with_retry", return_value=True)
+    @patch("binance_analyzer.flows.register_flow.console_log")
+    @patch("binance_analyzer.flows.register_flow.setup_logger")
     def test_register_url_changed_to_verification_without_captcha_stops_when_email_fetch_disabled(
         self,
         mock_setup_logger,
@@ -181,9 +181,9 @@ class InitialPageFailureTests(unittest.TestCase):
         mock_captcha_service.solve_if_present.assert_not_called()
         mock_handle_email_verification.assert_not_called()
 
-    @patch("binance_analyzer.register_flow._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/register"))
-    @patch("binance_analyzer.register_flow.click_register_continue_strict", return_value=True)
-    @patch("binance_analyzer.register_flow._dismiss_error_popup", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/register"))
+    @patch("binance_analyzer.flows.register_flow.click_register_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._dismiss_error_popup", return_value=True)
     def test_register_submit_ack_error_retries_three_times_before_fail(
         self,
         mock_dismiss,
@@ -202,9 +202,9 @@ class InitialPageFailureTests(unittest.TestCase):
         self.assertEqual(mock_dismiss.call_count, 3)
         self.assertEqual(mock_click_continue.call_count, 3)
 
-    @patch("binance_analyzer.register_flow._wait_for_page_response", return_value=("url_changed", "https://accounts.binance.com/zh-CN/register/verification-new-register?accountType=email"))
-    @patch("binance_analyzer.register_flow.click_register_continue_strict", return_value=True)
-    @patch("binance_analyzer.register_flow._dismiss_error_popup", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._wait_for_page_response", return_value=("url_changed", "https://accounts.binance.com/zh-CN/register/verification-new-register?accountType=email"))
+    @patch("binance_analyzer.flows.register_flow.click_register_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._dismiss_error_popup", return_value=True)
     def test_register_submit_ack_error_recovers_on_url_change(
         self,
         mock_dismiss,
@@ -235,9 +235,9 @@ class InitialPageFailureTests(unittest.TestCase):
             )
         )
 
-    @patch("binance_analyzer.register_flow._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/register"))
-    @patch("binance_analyzer.register_flow.click_register_continue_strict", return_value=True)
-    @patch("binance_analyzer.register_flow._dismiss_error_popup", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/register"))
+    @patch("binance_analyzer.flows.register_flow.click_register_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.register_flow._dismiss_error_popup", return_value=True)
     def test_register_submit_visible_ack_button_retries_without_error_text(
         self,
         mock_dismiss,

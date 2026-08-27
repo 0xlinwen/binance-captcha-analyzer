@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .local_cache import get_cache_manager
-from .traffic_monitor import mark_cached_url
+from ..runtime.local_cache import get_cache_manager
+from ..runtime.traffic_monitor import mark_cached_url
 
 
 # 可缓存的静态资源域名

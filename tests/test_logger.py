@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from binance_analyzer.logger import LoggerManager
+from binance_analyzer.runtime.logger import LoggerManager
 from binance_analyzer.results import AccountStatus
 
 

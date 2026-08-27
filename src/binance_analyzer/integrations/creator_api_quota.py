@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .file_lock import lock, unlock
+from ..runtime.file_lock import lock, unlock
 
 
 STATE_FILE = "data/runtime/creator_api_quota.json"

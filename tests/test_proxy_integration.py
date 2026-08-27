@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from binance_analyzer.proxy_integration import (
+from binance_analyzer.integrations.proxy_integration import (
     create_proxy_runtime,
     normalize_proxy_module_config,
 )

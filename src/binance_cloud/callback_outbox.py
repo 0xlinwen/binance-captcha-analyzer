@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from binance_analyzer.file_lock import lock, unlock
+from binance_analyzer.runtime.file_lock import lock, unlock
 
 
 def _now() -> datetime:

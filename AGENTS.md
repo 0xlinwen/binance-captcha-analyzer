@@ -16,21 +16,14 @@
 ## 架构约定
 
 - `src/binance_analyzer/cli.py`：命令行入口、并发调度、账号结果落盘。
-- `src/binance_analyzer/orchestrator.py`：单账号运行编排，负责代理、缓存、流程调用和 cookie 提取；浏览器上下文细节不放在此处。
-- `src/binance_analyzer/browser_context.py`：浏览器上下文、反检测初始化脚本、subprocess 启动本机 Google Chrome 和清理。
-- `src/binance_analyzer/cache_routes.py`：浏览器静态资源缓存路由和响应跟踪。
-- `src/binance_analyzer/flows.py`：登录/注册流程共享状态机工具和页面状态辅助函数。
-- `src/binance_analyzer/login_flow.py`：登录 URL 状态机。
-- `src/binance_analyzer/register_flow.py`：注册 URL 状态机。
+- `src/binance_analyzer/automation/`：浏览器上下文、编排、驱动、缓存路由和页面动作。
+- `src/binance_analyzer/flows/`：登录/注册状态机和页面信号。
 - `src/binance_analyzer/results.py`：账号状态枚举 `AccountStatus` 的唯一来源；`automation_driver.py` 的 `AutomationResult` 统一承载状态、错误和登录凭证，供 CLI 与 Windows Worker 使用。
-- `src/binance_analyzer/page_signals.py`：URL 状态、风控、代理失败、认证失败等页面信号检测的唯一来源。
+- `src/binance_analyzer/flows/page_signals.py`：URL 状态、风控、代理失败、认证失败等页面信号检测的唯一来源。
 - `src/binance_analyzer/captcha/`：验证码库包。`types.py` 定义类型，`detector.py` 识别页面类型，`prompts.py` 维护 AI 提示词，`ai_client.py` 封装 OpenRouter 请求，`solvers.py` 注册各类型 solver，`service.py` 提供求解主循环。
-- `src/binance_analyzer/account_storage.py`：账号队列与成功/失败账号结果文件。
-- `src/binance_analyzer/proxy_ip_storage.py`：代理出口 IP 使用记录。
-- `src/binance_analyzer/registered_account_storage.py`：`registered_accounts.json` 持久化，完整保存账号凭据供后续复用。
-- `src/binance_analyzer/creator_api.py`：创作者中心提取；先读 API 密钥，再点「编辑」读取昵称（`display_name`）和用户名（`username`）。
-- `src/binance_analyzer/creator_api_quota.py`：单次运行 API 提取名额，失败释放、成功占用。
-- `src/binance_analyzer/screenshot_storage.py`：截图清理。
+- `src/binance_analyzer/storage/`：账号队列、凭证、代理 IP、注册账号和截图存储。
+- `src/binance_analyzer/integrations/`：邮箱、Creator API 和业务代理集成。
+- `src/binance_analyzer/runtime/`：文件锁、日志、缓存和流量运行时。
 - `src/proxy_forwarder/`：代理解析、质量检查、本地转发和运行时管理的可复用包；`proxy_utils.py` 放纯代理解析/格式化工具，业务代码通过 `proxy_integration.py` 适配。
 - `src/binance_cloud/`：SQLite 数据库、Linux FastAPI 接口和 Windows 执行服务；本机 Cloud -> Worker -> 回调已实测。公网 HTTPS、端口放行和反向代理由部署环境负责；不提供 Cookie 在线检查。
 

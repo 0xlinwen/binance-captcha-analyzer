@@ -8,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-from binance_analyzer.account_storage import load_accounts
+from binance_analyzer.storage.account_storage import load_accounts
 
 
 TERMINAL = {"success", "failed", "cancelled", "proxy_quota_exceeded"}

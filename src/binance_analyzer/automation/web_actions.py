@@ -4,7 +4,7 @@ import traceback
 import logging
 import sys
 
-from .utils import dismiss_global_modal
+from ..utils import dismiss_global_modal
 
 logger = logging.getLogger(__name__)
 

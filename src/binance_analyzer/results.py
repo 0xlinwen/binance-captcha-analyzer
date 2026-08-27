@@ -10,7 +10,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .credential_export import CredentialSnapshot
+    from .storage.credential_export import CredentialSnapshot
 
 
 class AccountStatus(str, Enum):

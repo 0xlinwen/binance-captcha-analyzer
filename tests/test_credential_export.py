@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from binance_analyzer.credential_export import export_credentials
+from binance_analyzer.storage.credential_export import export_credentials
 
 
 class _Context:
