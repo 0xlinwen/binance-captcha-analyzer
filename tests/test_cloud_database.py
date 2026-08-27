@@ -86,6 +86,14 @@ class CloudDatabaseTests(unittest.TestCase):
             self.assertEqual(credential["cookie"], "new-cookie")
             self.assertEqual(credential["credential_updated_at"], "2026-08-27T10:00:00+00:00")
 
+    def test_idempotency_key_reuses_existing_job(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            first = db.create_job([{"email": "a@example.com", "password": "pw"}], idempotency_key="request-1")
+            second = db.create_job([{"email": "b@example.com", "password": "pw"}], idempotency_key="request-1")
+            self.assertEqual(first["id"], second["id"])
+            self.assertEqual(len(db.get_job(first["id"])["items"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

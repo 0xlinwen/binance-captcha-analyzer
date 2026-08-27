@@ -156,6 +156,11 @@ Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
 `BINANCE_WORKER_TOKEN`，Windows 端也必须设置同名变量；回调鉴权可另设
 `BINANCE_CALLBACK_TOKEN`。
 
+Windows `config.json` 可设置 `worker_max_workers` 控制同一任务内的账号并发数，
+例如 `2` 表示该 Windows Worker 全部任务最多同时执行两个账号，其余账号排队；默认值为 `1`（串行）。
+Linux 每次派发前会检查 Windows `/health` 的 `protocol_version`，并在任务请求中携带相同版本；版本不一致时任务不执行并记录为派发失败。Linux 与 Windows 必须部署同一版本代码。
+版本不兼容时，如果 `config.json` 配置了 `lark.webhook_url`，Linux 会发送一次系统告警；未配置时不发送外部通知，但错误会写入任务状态和执行日志，任务仍按重试策略处理。
+
 接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。请求体的 `mode` 可选 `login` 或 `register`，同一 Worker 可并行处理两种独立流程；当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 流程。
 
 当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须配置 `BINANCE_WINDOWS_WORKER_URL` 与 `BINANCE_CALLBACK_URL`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
@@ -317,6 +322,34 @@ email4@outlook.com----password4----client_id----refresh_token
 四段格式用于 Microsoft OAuth + IMAP，登录 Binance 时仍使用第二段 `password4`，第三/四段只用于邮箱验证码拉取。
 
 ## 运行
+
+### 从账号文件提交云端任务
+
+在 Linux API 已启动、Windows Worker 已注册并可访问时，可从任意能访问 Linux 的机器执行：
+
+```bash
+PYTHONPATH=src python -m binance_cloud.batch_submit \
+  --file accounts.txt \
+  --cloud-url http://Linux公网IP:8000 \
+  --mode login \
+  --batch-size 20 \
+  --count 100 \
+  --timeout-seconds 86400
+```
+
+命令会读取账号文件（支持 `email:password` 和 `email----password`），按批次调用
+`POST /api/login-jobs` 并轮询任务结果。Linux 项目根目录 `config.json` 中配置：
+
+```json
+{
+  "lark": {
+    "webhook_url": "你的 Lark 机器人 Webhook"
+  }
+}
+```
+
+全局任务连续 5 个失败只发送一次告警，全部账号完成只发送一次汇总通知；单账号任务不发送通知。通知由 Linux API 统一发送，Webhook 不从命令行传入。
+`--timeout-seconds` 是批量客户端的整体等待上限，超时后命令退出，但 Linux 中已创建的任务继续运行。接口请求可提供 `idempotency_key`，同一键重复提交会返回原任务，不重复创建账号任务。
 
 ```bash
 # 正常运行

@@ -19,6 +19,7 @@
   },
   "mode": "login",
   "debug_mode": false,
+  "worker_max_workers": 1,
   "login": {
     "start_url": "https://accounts.binance.com/zh-CN/login"
   },

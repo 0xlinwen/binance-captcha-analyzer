@@ -22,10 +22,16 @@ CREATE TABLE IF NOT EXISTS accounts (
   status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS login_jobs (
-  id TEXT PRIMARY KEY, status TEXT NOT NULL, task_mode TEXT NOT NULL DEFAULT 'login', proxy_mode TEXT NOT NULL DEFAULT 'direct',
+  id TEXT PRIMARY KEY, status TEXT NOT NULL, task_mode TEXT NOT NULL DEFAULT 'login', idempotency_key TEXT UNIQUE, proxy_mode TEXT NOT NULL DEFAULT 'direct',
   proxy_address TEXT, max_accounts_per_proxy INTEGER, total_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+  task_group_id TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS task_groups (
+  id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'submitted', total_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
+  failure_alerted INTEGER NOT NULL DEFAULT 0, completion_notified INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, completed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS login_job_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES login_jobs(id),
@@ -52,6 +58,9 @@ CREATE TABLE IF NOT EXISTS worker_nodes (
   id TEXT PRIMARY KEY, name TEXT, status TEXT NOT NULL DEFAULT 'offline', version TEXT,
   last_heartbeat_at TEXT, current_job_item_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notification_events (
+  event_key TEXT PRIMARY KEY, created_at TEXT NOT NULL
+);
 """
 
 
@@ -73,6 +82,11 @@ class Database:
         job_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_jobs)")}
         if "task_mode" not in job_columns:
             self.conn.execute("ALTER TABLE login_jobs ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'login'")
+        if "task_group_id" not in job_columns:
+            self.conn.execute("ALTER TABLE login_jobs ADD COLUMN task_group_id TEXT")
+        if "idempotency_key" not in job_columns:
+            self.conn.execute("ALTER TABLE login_jobs ADD COLUMN idempotency_key TEXT")
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_login_jobs_idempotency ON login_jobs(idempotency_key) WHERE idempotency_key IS NOT NULL")
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_job_items)")}
         for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2")):
             if name not in columns:
@@ -98,7 +112,13 @@ class Database:
                 (email, password, client_id, refresh_token, now, now))
             return self._one("SELECT * FROM accounts WHERE email=?", (email,))
 
-    def create_job(self, accounts: list[dict], proxy: dict | None = None, *, task_mode: str = "login") -> dict:
+    def create_task_group(self, total_count: int = 0) -> dict:
+        group_id = str(uuid.uuid4())
+        with self._lock, self.conn:
+            self.conn.execute("INSERT INTO task_groups(id,total_count,created_at) VALUES(?,?,?)", (group_id, total_count, utc_now()))
+        return self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
+
+    def create_job(self, accounts: list[dict], proxy: dict | None = None, *, task_mode: str = "login", task_group_id: str | None = None, idempotency_key: str | None = None) -> dict:
         if not accounts:
             raise ValueError("任务至少需要一个账号")
         proxy = proxy or {}
@@ -114,8 +134,14 @@ class Database:
             raise ValueError("固定代理必须配置 address 和正整数 max_accounts_per_job")
         now, job_id = utc_now(), str(uuid.uuid4())
         with self._lock, self.conn:
-            self.conn.execute("INSERT INTO login_jobs(id,status,task_mode,proxy_mode,proxy_address,max_accounts_per_proxy,total_count,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                              (job_id, "submitted", task_mode, mode, address, limit, len(accounts), now))
+            if idempotency_key:
+                existing = self._one("SELECT * FROM login_jobs WHERE idempotency_key=?", (idempotency_key,))
+                if existing:
+                    return existing
+            if task_group_id and not self._one("SELECT id FROM task_groups WHERE id=?", (task_group_id,)):
+                raise ValueError("任务组不存在")
+            self.conn.execute("INSERT INTO login_jobs(id,status,task_mode,idempotency_key,proxy_mode,proxy_address,max_accounts_per_proxy,total_count,task_group_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                              (job_id, "submitted", task_mode, idempotency_key, mode, address, limit, len(accounts), task_group_id, now))
             quota_exceeded = 0
             for index, account in enumerate(accounts):
                 self.conn.execute("""INSERT INTO accounts(email,password,client_id,refresh_token,created_at,updated_at)
@@ -131,6 +157,8 @@ class Database:
                 self.conn.execute("UPDATE login_jobs SET failed_count=? WHERE id=?", (quota_exceeded, job_id))
             if mode == "fixed":
                 self.conn.execute("INSERT INTO login_job_proxy_usage(job_id,proxy_address,assigned_count,last_assigned_at) VALUES(?,?,?,?)", (job_id, address, min(len(accounts), limit), now))
+            if task_group_id:
+                self.conn.execute("UPDATE task_groups SET total_count=total_count+? WHERE id=?", (len(accounts), task_group_id))
         return self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
 
     def create_relogin_job(self, account_id: int, proxy: dict | None = None) -> dict:
@@ -138,6 +166,72 @@ class Database:
         if not account:
             raise ValueError("账号不存在")
         return self.create_job([account], proxy, task_mode="login")
+
+    def task_group(self, group_id: str):
+        group = self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
+        if group:
+            rows = self.conn.execute("SELECT * FROM login_jobs WHERE task_group_id=? ORDER BY created_at", (group_id,)).fetchall()
+            group["jobs"] = [dict(row) for row in rows]
+        return group
+
+    def refresh_task_group(self, group_id: str) -> dict | None:
+        with self._lock, self.conn:
+            counts = self.conn.execute("""SELECT COUNT(*), SUM(i.status='success'), SUM(i.status IN ('failed','cancelled','proxy_quota_exceeded')),
+                SUM(i.status IN ('queued','running','retryable')) FROM login_job_items i JOIN login_jobs j ON j.id=i.job_id WHERE j.task_group_id=?""", (group_id,)).fetchone()
+            total, success, failed, pending = counts[0], counts[1] or 0, counts[2] or 0, counts[3] or 0
+            status = "completed" if total and pending == 0 else "running"
+            self.conn.execute("UPDATE task_groups SET total_count=?,success_count=?,failed_count=?,status=?,completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE completed_at END WHERE id=?", (total, success, failed, status, status, utc_now(), group_id))
+            return self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
+
+    def claim_task_group_failure_alert(self, group_id: str) -> bool:
+        with self._lock, self.conn:
+            row = self._one("SELECT failure_alerted FROM task_groups WHERE id=?", (group_id,))
+            if not row or row["failure_alerted"]:
+                return False
+            group = self.refresh_task_group(group_id)
+            if not group or group["total_count"] <= 1:
+                return False
+            rows = self.conn.execute("SELECT i.status FROM login_job_items i JOIN login_jobs j ON j.id=i.job_id WHERE j.task_group_id=? AND i.completed_at IS NOT NULL ORDER BY i.completed_at DESC", (group_id,)).fetchall()
+            streak = 0
+            for row in rows:
+                if row[0] in {"failed", "cancelled", "proxy_quota_exceeded"}:
+                    streak += 1
+                else:
+                    break
+            if streak < 5:
+                return False
+            return True
+
+    def mark_task_group_failure_alerted(self, group_id: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE task_groups SET failure_alerted=1 WHERE id=?", (group_id,))
+
+    def claim_task_group_completion_notification(self, group_id: str) -> dict | None:
+        with self._lock, self.conn:
+            group = self.refresh_task_group(group_id)
+            if not group or group["total_count"] <= 1 or group["status"] != "completed" or group["completion_notified"]:
+                return None
+            return group
+
+    def mark_task_group_completion_notified(self, group_id: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE task_groups SET completion_notified=1 WHERE id=?", (group_id,))
+
+    def pending_task_group_notifications(self) -> list[str]:
+        rows = self.conn.execute("SELECT id FROM task_groups WHERE failure_alerted=0 OR completion_notified=0").fetchall()
+        return [row[0] for row in rows]
+
+    def claim_notification_event(self, event_key: str) -> bool:
+        with self._lock, self.conn:
+            try:
+                self.conn.execute("INSERT INTO notification_events(event_key,created_at) VALUES(?,?)", (event_key, utc_now()))
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def release_notification_event(self, event_key: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("DELETE FROM notification_events WHERE event_key=?", (event_key,))
 
     def get_job(self, job_id: str):
         job = self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
@@ -316,6 +410,9 @@ class Database:
                     (1 if status == "success" else 0, 0 if status == "success" else 1, now, item["job_id"], item["proxy_address"]))
             self.record_log("callback_received", f"status={status}", job_id=item["job_id"], job_item_id=item_id, account_id=item["account_id"], worker_id=payload.get("worker_id"))
             self._refresh_job_state(item["job_id"], now)
+            job = self._one("SELECT task_group_id FROM login_jobs WHERE id=?", (item["job_id"],))
+            if job and job.get("task_group_id"):
+                self.refresh_task_group(job["task_group_id"])
             return self._one("SELECT * FROM login_job_items WHERE id=?", (item_id,))
 
     def credential(self, account_id: int):
