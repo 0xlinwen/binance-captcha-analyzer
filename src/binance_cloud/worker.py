@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,26 +16,37 @@ from fastapi import FastAPI, HTTPException, Header
 from binance_analyzer.config import load_config
 from binance_analyzer.orchestrator import register_account
 from .callback_outbox import CallbackOutbox
-from .protocols import ExecuteLoginPayload, PROTOCOL_VERSION
+from .protocols import ExecuteLoginPayload
 
 
 app = FastAPI(title="Binance Login Windows Worker")
 BASE_DIR = Path(os.getenv("BINANCE_WORKER_BASE_DIR", ".")).resolve()
 CONFIG = None
-LINUX_CALLBACK_URL = os.getenv("BINANCE_CALLBACK_URL", "")
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", WORKER_TOKEN)
-WORKER_ID = os.getenv("BINANCE_WORKER_ID", "windows-01")
 CALLBACK_OUTBOX = CallbackOutbox(BASE_DIR / "output" / "callback_outbox.json")
 ACCOUNT_EXECUTOR: ThreadPoolExecutor | None = None
 ACCOUNT_EXECUTOR_SIZE: int | None = None
 ACCOUNT_EXECUTOR_LOCK = threading.Lock()
 
 
+def _worker_config() -> dict:
+    path = BASE_DIR / "config" / "worker.json"
+    if not path.exists():
+        raise FileNotFoundError(f"缺少 Worker 配置文件: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("config/worker.json 必须是 JSON 对象")
+    for key in ("protocol_version", "worker_id", "callback_url"):
+        if not isinstance(data.get(key), str) or (key != "callback_url" and not data[key].strip()):
+            raise ValueError(f"config/worker.json 缺少 {key}")
+    return data
+
+
 def _config_for_task(proxy: dict, mode: str) -> dict:
     global CONFIG
     if CONFIG is None:
-        CONFIG = load_config(BASE_DIR)
+        CONFIG = load_config(BASE_DIR, "config/automation.json")
     config = dict(CONFIG)
     configured = dict(CONFIG.get("proxy") or {})
     task_mode = str(mode).strip().lower()
@@ -98,7 +110,9 @@ def _callback_retry_loop() -> None:
 
 def execute(payload: dict) -> None:
     job_id = payload["job_id"]
-    callback_url = payload.get("callback_url") or LINUX_CALLBACK_URL
+    worker_config = _worker_config()
+    callback_url = payload.get("callback_url") or worker_config["callback_url"]
+    worker_id = worker_config["worker_id"]
     headers = {"X-Worker-Token": WORKER_TOKEN} if WORKER_TOKEN else {}
     callback_base = callback_url.rsplit("/api/", 1)[0]
     try:
@@ -106,13 +120,13 @@ def execute(payload: dict) -> None:
     except Exception as exc:
         for account in payload["accounts"]:
             _queue_callback(callback_url, {"job_id": job_id, "job_item_id": account["job_item_id"],
-                                            "account_id": account["account_id"], "worker_id": WORKER_ID,
+                                            "account_id": account["account_id"], "worker_id": worker_id,
                                             "status": "failed", "error_code": "worker_config_error",
                                             "error_message": str(exc)})
         return
     accounts = payload["accounts"]
     if len(accounts) > 1 and not payload.get("_parallelized"):
-        max_workers = int(task_config.get("worker_max_workers", 1))
+        max_workers = int(worker_config.get("worker_max_workers", 1))
         if max_workers <= 0:
             raise ValueError("worker_max_workers 必须是正整数")
         executor = _account_executor(max_workers)
@@ -126,15 +140,15 @@ def execute(payload: dict) -> None:
             password = f"{password}----{account['client_id']}----{account['refresh_token']}"
         heartbeat_stop = threading.Event()
         try:
-            debug_mode = bool(task_config.get("debug_mode", False))
+            debug_mode = bool(worker_config.get("debug_mode", False))
             if not debug_mode:
-                state_response = requests.get(callback_base + f"/api/login-jobs/{job_id}/status", headers=callback_headers, timeout=20)
+                state_response = requests.get(callback_base + f"/api/login-jobs/{job_id}/status", headers=headers, timeout=20)
                 state_response.raise_for_status()
                 if state_response.json()["status"] == "cancelled":
                     break
             heartbeat_thread = None
             if callback_base and not debug_mode:
-                heartbeat_url = callback_base + f"/api/workers/{WORKER_ID}/heartbeat"
+                heartbeat_url = callback_base + f"/api/workers/{worker_id}/heartbeat"
                 requests.post(heartbeat_url, json={"current_job_item_id": account["job_item_id"]}, headers=headers, timeout=20).raise_for_status()
                 def heartbeat_loop():
                     while not heartbeat_stop.wait(30):
@@ -154,7 +168,7 @@ def execute(payload: dict) -> None:
             else:
                 callback_status = status.value if status.value in {"success", "failed", "proxy_failed", "rate_limited"} else "failed"
                 callback_error_code = None if callback_status == "success" else (getattr(automation_result, "error_code", None) or status.value)
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": callback_status,
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id, "status": callback_status,
                       "error_code": callback_error_code,
                       "error_message": "登录成功但未导出凭证" if callback_error_code == "credentials_missing" else getattr(automation_result, "error_message", None)}
             if callback_status == "success":
@@ -162,7 +176,7 @@ def execute(payload: dict) -> None:
                                "cookie_expires_at": credentials.cookie_expires_at,
                                "credential_updated_at": credentials.credential_updated_at or datetime.now(timezone.utc).isoformat()})
         except Exception as exc:
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": WORKER_ID, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
         finally:
             heartbeat_stop.set()
         if callback_url:
@@ -171,7 +185,12 @@ def execute(payload: dict) -> None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "worker_id": WORKER_ID, "protocol_version": PROTOCOL_VERSION}
+    config = _worker_config()
+    return {"status": "ok", "worker_id": config["worker_id"], "protocol_version": config["protocol_version"]}
+
+
+def _protocol_version() -> str:
+    return _worker_config()["protocol_version"].strip()
 
 
 @app.on_event("startup")
@@ -181,9 +200,10 @@ def start_callback_retry_loop() -> None:
 
 @app.post("/worker/register")
 def register():
-    if not LINUX_CALLBACK_URL:
+    config = _worker_config()
+    if not config["callback_url"]:
         return {"status": "standalone"}
-    response = requests.post(LINUX_CALLBACK_URL.rsplit("/api/", 1)[0] + f"/api/workers/{WORKER_ID}/register", json={"version": "1"}, headers={"X-Worker-Token": WORKER_TOKEN}, timeout=20)
+    response = requests.post(config["callback_url"].rsplit("/api/", 1)[0] + f"/api/workers/{config['worker_id']}/register", json={"version": config["protocol_version"]}, headers={"X-Worker-Token": WORKER_TOKEN}, timeout=20)
     response.raise_for_status()
     return response.json()
 
@@ -192,8 +212,8 @@ def register():
 def execute_login(payload: ExecuteLoginPayload, x_worker_token: str | None = Header(default=None)):
     if WORKER_TOKEN and x_worker_token != WORKER_TOKEN:
         raise HTTPException(401, "Worker token 无效")
-    if payload.protocol_version != PROTOCOL_VERSION:
-        raise HTTPException(409, f"Worker 协议版本不兼容: worker={PROTOCOL_VERSION}, request={payload.protocol_version}")
+    if payload.protocol_version != _protocol_version():
+        raise HTTPException(409, f"Worker 协议版本不兼容: worker={_protocol_version()}, request={payload.protocol_version}")
     value = payload.model_dump()
     threading.Thread(target=execute, args=(value,), daemon=True).start()
     return {"job_id": payload.job_id, "status": "accepted"}

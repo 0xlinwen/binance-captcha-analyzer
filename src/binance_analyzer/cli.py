@@ -173,7 +173,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     base_dir = Path(__file__).resolve().parents[2]
-    config = load_config(base_dir)
+    config = load_config(base_dir, "config/automation.json")
     headless = config["headless"]
 
     # 如果指定了刷新缓存，执行后退出

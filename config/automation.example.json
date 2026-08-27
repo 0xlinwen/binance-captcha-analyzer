@@ -1,0 +1,21 @@
+{
+  "openrouter_api_key": "",
+  "models": ["google/gemini-3-flash-preview"],
+  "imap_host": "imap.example.com",
+  "imap_port": 993,
+  "accounts_file": "accounts.txt",
+  "output_file": "output/registered_accounts.json",
+  "headless": false,
+  "max_workers": 1,
+  "max_login_retries": 3,
+  "mode": "login",
+  "login": {"start_url": "https://accounts.binance.com/zh-CN/login"},
+  "register": {"submit_error_ack_max_attempts": 3},
+  "creator_api": {"enabled": false, "max_accounts": 1, "slot_wait_timeout_sec": 600},
+  "captcha": {"retry_mode": "fast", "max_attempts_per_round": 1, "max_rounds": 3, "cooldown_on_risk_min_sec": 30, "cooldown_on_risk_max_sec": 90, "click_retry_per_cell": 3},
+  "mfa": {"submit_retry": 2, "email_verification_enabled": true, "not_registered_keywords": ["未注册", "账号不存在", "account does not exist", "not registered", "没有账号"]},
+  "cache": {"enabled": true},
+  "ai_proxy": {"enabled": false, "bootstrap": {"host": "proxy-bootstrap.example.com", "port": 10000, "username": "", "password": ""}},
+  "proxy": {"enabled": false, "used_ips_file": "output/used_proxy_ips.txt", "mode": "dynamic", "api_url": "https://proxy-api.example.com/gen", "timeout_seconds": 15, "check_timeout_seconds": 15, "proxy_quality_check_enabled": true, "proxy_quality_check_timeout_seconds": 10, "proxy_quality_check_max_latency_ms": 2500, "proxy_quality_check_url": "https://accounts.binance.com/zh-CN/login", "bootstrap": {"host": "proxy-bootstrap.example.com", "port": 10000, "username": "", "password": ""}, "gost": {"binary": "gost", "listen_host": "127.0.0.1", "listen_port": 0}},
+  "runtime": {"max_workers_default": 2, "retry_delay_min_sec": 20, "retry_delay_max_sec": 60, "proxy_retry_delay_min_sec": 10, "proxy_retry_delay_max_sec": 30}
+}

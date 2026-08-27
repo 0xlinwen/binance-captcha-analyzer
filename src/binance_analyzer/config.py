@@ -110,13 +110,13 @@ def _normalize_creator_api_config(config: dict) -> None:
     )
 
 
-def load_config(base_dir: Path) -> dict:
-    """读取配置并补齐当前版本的运行默认值。"""
-    config_path = base_dir / "config.json"
+def load_config(base_dir: Path, filename: str = "config/automation.json") -> dict:
+    """读取自动化角色配置并补齐当前版本的运行默认值。"""
+    config_path = base_dir / filename
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
     if not isinstance(config, dict):
-        raise ValueError("config.json 必须是 JSON 对象")
+        raise ValueError(f"{filename} 必须是 JSON 对象")
 
     if "mode" not in config:
         raise ValueError("缺少必填配置: mode")
@@ -182,7 +182,7 @@ def load_config(base_dir: Path) -> dict:
         config["openrouter_api_key"] = env_api_key
 
     if not config.get("openrouter_api_key"):
-        raise ValueError("缺少 OpenRouter API Key，请设置 OPENROUTER_API_KEY 或在 config.json 中配置 openrouter_api_key")
+        raise ValueError(f"缺少 OpenRouter API Key，请设置 OPENROUTER_API_KEY 或在 {filename} 中配置 openrouter_api_key")
 
     models = config.get("models")
     if not isinstance(models, list):

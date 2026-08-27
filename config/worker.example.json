@@ -1,0 +1,7 @@
+{
+  "protocol_version": "1",
+  "worker_id": "windows-01",
+  "worker_max_workers": 1,
+  "debug_mode": false,
+  "callback_url": "https://linux.example.com/api/worker/callback"
+}

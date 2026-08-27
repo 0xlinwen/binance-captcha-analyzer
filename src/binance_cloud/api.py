@@ -15,17 +15,27 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from .database import Database
-from .protocols import CallbackPayload, PROTOCOL_VERSION
+from .protocols import CallbackPayload
 
 
-DB_PATH = os.getenv("BINANCE_CLOUD_DB", "data/binance.db")
-WINDOWS_WORKER_URL = os.getenv("BINANCE_WINDOWS_WORKER_URL", "")
+_CLOUD_CONFIG_PATH = Path("config/cloud.json")
+if not _CLOUD_CONFIG_PATH.exists():
+    raise FileNotFoundError(f"缺少 Cloud 配置文件: {_CLOUD_CONFIG_PATH}")
+_CLOUD_CONFIG = json.loads(_CLOUD_CONFIG_PATH.read_text(encoding="utf-8"))
+if not isinstance(_CLOUD_CONFIG, dict):
+    raise ValueError("Cloud 配置文件必须是 JSON 对象")
+for _key in ("database_path", "windows_worker_url", "callback_url", "protocol_version", "task_lease_seconds"):
+    if _key not in _CLOUD_CONFIG:
+        raise ValueError(f"Cloud 配置缺少 {_key}")
+DB_PATH = _CLOUD_CONFIG["database_path"]
+WINDOWS_WORKER_URL = _CLOUD_CONFIG["windows_worker_url"]
+CALLBACK_URL = _CLOUD_CONFIG["callback_url"]
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", "")
 
 
 def _load_lark_webhook() -> str:
-    path = Path(os.getenv("BINANCE_CLOUD_CONFIG", "config.json"))
+    path = _CLOUD_CONFIG_PATH
     if not path.exists():
         return ""
     try:
@@ -62,9 +72,20 @@ def _notify_task_group(group_id: str) -> None:
     if group:
         _notify_lark(f"Binance 全局任务完成：任务组 {group_id}，总数 {group['total_count']}，成功 {group['success_count']}，失败 {group['failed_count']}")
         db.mark_task_group_completion_notified(group_id)
-LEASE_SECONDS = int(os.getenv("BINANCE_TASK_LEASE_SECONDS", "1800"))
+LEASE_SECONDS = int(_CLOUD_CONFIG["task_lease_seconds"])
 db = Database(DB_PATH)
 app = FastAPI(title="Binance Login Cloud API")
+
+
+def _cloud_config() -> dict:
+    return _CLOUD_CONFIG
+
+
+def _protocol_version() -> str:
+    value = _cloud_config().get("protocol_version")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Cloud 配置缺少 protocol_version")
+    return value.strip()
 
 
 def _auth(value: str | None, expected: str, label: str) -> None:
@@ -110,13 +131,13 @@ def save_account(account: AccountIn):
 @app.post("/api/login-jobs")
 def create_job(request: JobIn):
     try:
-        if not WINDOWS_WORKER_URL or not os.getenv("BINANCE_CALLBACK_URL"):
-            raise ValueError("必须配置 BINANCE_WINDOWS_WORKER_URL 和 BINANCE_CALLBACK_URL")
+        if not WINDOWS_WORKER_URL or not CALLBACK_URL:
+            raise ValueError("config/cloud.json 必须配置 windows_worker_url 和 callback_url")
         job = db.create_job([a.model_dump() for a in request.accounts], request.proxy.model_dump(), task_mode=request.mode, task_group_id=request.task_group_id, idempotency_key=request.idempotency_key)
         db.mark_job_running(job["id"])
         if WINDOWS_WORKER_URL:
             payload = db.worker_payload(job["id"])
-            payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
+            payload["callback_url"] = CALLBACK_URL
             db.mark_items_running(job["id"], "dispatching", LEASE_SECONDS)
             threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
         return {"job_id": job["id"], "status": "submitted", "total_count": job["total_count"], "worker_url": WINDOWS_WORKER_URL}
@@ -130,14 +151,14 @@ def _dispatch_worker(payload: dict) -> None:
         health = requests.get(f"{WINDOWS_WORKER_URL.rstrip('/')}/health", timeout=10)
         health.raise_for_status()
         worker_health = health.json()
-        if worker_health.get("protocol_version") != PROTOCOL_VERSION:
+        if worker_health.get("protocol_version") != _protocol_version():
             group_id = payload.get("task_group_id") or payload.get("job_id")
-            _notify_once(f"worker-version:{group_id}", f"Binance Worker 协议版本不兼容：任务 {group_id}，Linux={PROTOCOL_VERSION}，Windows={worker_health.get('protocol_version') or 'unknown'}")
+            _notify_once(f"worker-version:{group_id}", f"Binance Worker 协议版本不兼容：任务 {group_id}，Linux={_protocol_version()}，Windows={worker_health.get('protocol_version') or 'unknown'}")
             raise RuntimeError("Windows Worker 协议版本不兼容")
         worker_id = str(worker_health.get("worker_id") or "")
         if worker_id:
-            db.register_worker(worker_id, version=PROTOCOL_VERSION)
-        payload["protocol_version"] = PROTOCOL_VERSION
+            db.register_worker(worker_id, version=_protocol_version())
+        payload["protocol_version"] = _protocol_version()
         response = requests.post(f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/execute-login", json=payload, headers=headers, timeout=30)
         response.raise_for_status()
     except Exception as exc:
@@ -158,7 +179,7 @@ def _maintenance_loop() -> None:
             for job_id in db.pending_jobs():
                 if WINDOWS_WORKER_URL:
                     payload = db.worker_payload(job_id)
-                    payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
+                    payload["callback_url"] = CALLBACK_URL
                     db.mark_items_running(job_id, "dispatching", LEASE_SECONDS)
                     threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
         except Exception as exc:
@@ -249,13 +270,13 @@ def credential(account_id: int):
 @app.post("/api/accounts/{account_id}/relogin")
 def relogin(account_id: int, proxy: ProxyIn = ProxyIn()):
     try:
-        if not WINDOWS_WORKER_URL or not os.getenv("BINANCE_CALLBACK_URL"):
-            raise ValueError("必须配置 BINANCE_WINDOWS_WORKER_URL 和 BINANCE_CALLBACK_URL")
+        if not WINDOWS_WORKER_URL or not CALLBACK_URL:
+            raise ValueError("config/cloud.json 必须配置 windows_worker_url 和 callback_url")
         job = db.create_relogin_job(account_id, proxy.model_dump())
         db.mark_job_running(job["id"])
         if WINDOWS_WORKER_URL:
             payload = db.worker_payload(job["id"])
-            payload["callback_url"] = os.getenv("BINANCE_CALLBACK_URL", "")
+            payload["callback_url"] = CALLBACK_URL
             db.mark_items_running(job["id"], "dispatching", LEASE_SECONDS)
             threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
         return {"job_id": job["id"], "status": "submitted"}
