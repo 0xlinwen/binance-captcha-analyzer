@@ -25,7 +25,7 @@ if not _CLOUD_CONFIG_PATH.exists():
 _CLOUD_CONFIG = json.loads(_CLOUD_CONFIG_PATH.read_text(encoding="utf-8"))
 if not isinstance(_CLOUD_CONFIG, dict):
     raise ValueError("Cloud 配置文件必须是 JSON 对象")
-for _key in ("database_path", "windows_worker_url", "callback_url", "protocol_version", "task_lease_seconds"):
+for _key in ("database_path", "windows_worker_url", "callback_url", "protocol_version", "task_lease_seconds", "consecutive_failure_limit"):
     if _key not in _CLOUD_CONFIG:
         raise ValueError(f"Cloud 配置缺少 {_key}")
 _configured_db_path = Path(_CLOUD_CONFIG["database_path"])
@@ -34,6 +34,9 @@ WINDOWS_WORKER_URL = _CLOUD_CONFIG["windows_worker_url"]
 CALLBACK_URL = _CLOUD_CONFIG["callback_url"]
 WORKER_TOKEN = os.getenv("BINANCE_WORKER_TOKEN", "")
 CALLBACK_TOKEN = os.getenv("BINANCE_CALLBACK_TOKEN", "")
+CONSECUTIVE_FAILURE_LIMIT = _CLOUD_CONFIG["consecutive_failure_limit"]
+if not isinstance(CONSECUTIVE_FAILURE_LIMIT, int) or CONSECUTIVE_FAILURE_LIMIT <= 0:
+    raise ValueError("Cloud 配置 consecutive_failure_limit 必须是正整数")
 
 
 def _load_lark_webhook() -> str:
@@ -77,11 +80,12 @@ def _notify_task_group(group_id: str) -> None:
             raise
         mark_sent(group_id)
 
-    if db.claim_task_group_failure_alert(group_id):
+    if db.claim_task_group_failure_alert(group_id, CONSECUTIVE_FAILURE_LIMIT):
         group = db.task_group(group_id) or {}
+        db.cancel_task_group(group_id)
         send_once(
             f"task-group-failure:{group_id}",
-            f"Binance 全局任务连续失败达到 5 个：任务组 {group_id}，失败数 {group.get('failed_count', 0)}",
+            f"Binance 全局任务连续失败达到 {CONSECUTIVE_FAILURE_LIMIT} 个，任务已停止：任务组 {group_id}，失败数 {group.get('failed_count', 0)}",
             db.mark_task_group_failure_alerted,
         )
     group = db.claim_task_group_completion_notification(group_id)

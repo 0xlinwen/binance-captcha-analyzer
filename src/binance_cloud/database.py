@@ -24,12 +24,12 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS login_jobs (
   id TEXT PRIMARY KEY, status TEXT NOT NULL, task_mode TEXT NOT NULL DEFAULT 'login', idempotency_key TEXT UNIQUE, proxy_mode TEXT NOT NULL DEFAULT 'direct',
   proxy_address TEXT, max_accounts_per_proxy INTEGER, total_count INTEGER NOT NULL DEFAULT 0,
-  success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0, cancelled_count INTEGER NOT NULL DEFAULT 0,
   task_group_id TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS task_groups (
   id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'submitted', total_count INTEGER NOT NULL DEFAULT 0,
-  success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0, cancelled_count INTEGER NOT NULL DEFAULT 0,
   failure_alerted INTEGER NOT NULL DEFAULT 0, completion_notified INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, completed_at TEXT
 );
@@ -87,6 +87,11 @@ class Database:
         if "idempotency_key" not in job_columns:
             self.conn.execute("ALTER TABLE login_jobs ADD COLUMN idempotency_key TEXT")
             self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_login_jobs_idempotency ON login_jobs(idempotency_key) WHERE idempotency_key IS NOT NULL")
+        if "cancelled_count" not in job_columns:
+            self.conn.execute("ALTER TABLE login_jobs ADD COLUMN cancelled_count INTEGER NOT NULL DEFAULT 0")
+        group_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(task_groups)")}
+        if "cancelled_count" not in group_columns:
+            self.conn.execute("ALTER TABLE task_groups ADD COLUMN cancelled_count INTEGER NOT NULL DEFAULT 0")
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_job_items)")}
         for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2")):
             if name not in columns:
@@ -171,14 +176,14 @@ class Database:
 
     def refresh_task_group(self, group_id: str) -> dict | None:
         with self._lock, self.conn:
-            counts = self.conn.execute("""SELECT COUNT(*), SUM(i.status='success'), SUM(i.status IN ('failed','cancelled','proxy_quota_exceeded')),
+            counts = self.conn.execute("""SELECT COUNT(*), SUM(i.status='success'), SUM(i.status IN ('failed','proxy_quota_exceeded')), SUM(i.status='cancelled'),
                 SUM(i.status IN ('queued','running','retryable')) FROM login_job_items i JOIN login_jobs j ON j.id=i.job_id WHERE j.task_group_id=?""", (group_id,)).fetchone()
-            total, success, failed, pending = counts[0], counts[1] or 0, counts[2] or 0, counts[3] or 0
+            total, success, failed, cancelled, pending = counts[0], counts[1] or 0, counts[2] or 0, counts[3] or 0, counts[4] or 0
             status = "completed" if total and pending == 0 else "running"
-            self.conn.execute("UPDATE task_groups SET total_count=?,success_count=?,failed_count=?,status=?,completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE completed_at END WHERE id=?", (total, success, failed, status, status, utc_now(), group_id))
+            self.conn.execute("UPDATE task_groups SET total_count=?,success_count=?,failed_count=?,cancelled_count=?,status=?,completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE completed_at END WHERE id=?", (total, success, failed, cancelled, status, status, utc_now(), group_id))
             return self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
 
-    def claim_task_group_failure_alert(self, group_id: str) -> bool:
+    def claim_task_group_failure_alert(self, group_id: str, threshold: int) -> bool:
         with self._lock, self.conn:
             row = self._one("SELECT failure_alerted FROM task_groups WHERE id=?", (group_id,))
             if not row or row["failure_alerted"]:
@@ -189,13 +194,29 @@ class Database:
             rows = self.conn.execute("SELECT i.status FROM login_job_items i JOIN login_jobs j ON j.id=i.job_id WHERE j.task_group_id=? AND i.completed_at IS NOT NULL ORDER BY i.completed_at DESC", (group_id,)).fetchall()
             streak = 0
             for row in rows:
-                if row[0] in {"failed", "cancelled", "proxy_quota_exceeded"}:
+                if row[0] == "failed":
                     streak += 1
                 else:
                     break
-            if streak < 5:
+            if streak < threshold:
                 return False
             return True
+
+    def cancel_task_group(self, group_id: str) -> None:
+        with self._lock, self.conn:
+            now = utc_now()
+            item_rows = self.conn.execute("SELECT id,job_id,account_id FROM login_job_items WHERE job_id IN (SELECT id FROM login_jobs WHERE task_group_id=?) AND status IN ('queued','retryable','running')", (group_id,)).fetchall()
+            job_rows = self.conn.execute("SELECT id FROM login_jobs WHERE task_group_id=? AND status NOT IN ('completed','cancelled')", (group_id,)).fetchall()
+            self.conn.execute("UPDATE login_job_items SET status='cancelled',completed_at=? WHERE job_id IN (SELECT id FROM login_jobs WHERE task_group_id=?) AND status IN ('queued','retryable','running')", (now, group_id))
+            for row in job_rows:
+                self._refresh_job_state(row[0], now)
+            self.conn.execute("UPDATE login_jobs SET status='cancelled',completed_at=? WHERE task_group_id=? AND status NOT IN ('completed','cancelled')", (now, group_id))
+            for row in job_rows:
+                self.record_log("job_cancelled", "任务组连续失败达到阈值，任务停止", job_id=row[0], level="WARNING")
+            for row in item_rows:
+                self.record_log("account_cancelled", "任务组连续失败达到阈值，账号未完成执行", job_id=row[1], job_item_id=row[0], account_id=row[2], level="WARNING")
+            self.refresh_task_group(group_id)
+            self.conn.execute("UPDATE task_groups SET status='cancelled', completion_notified=1 WHERE id=?", (group_id,))
 
     def mark_task_group_failure_alerted(self, group_id: str) -> None:
         with self._lock, self.conn:
@@ -273,15 +294,15 @@ class Database:
 
     def _refresh_job_state(self, job_id: str, now: str | None = None) -> None:
         counts = self.conn.execute(
-            "SELECT SUM(status='success'), SUM(status IN ('failed','cancelled','proxy_quota_exceeded')), COUNT(*) "
+            "SELECT SUM(status='success'), SUM(status IN ('failed','proxy_quota_exceeded')), SUM(status='cancelled'), COUNT(*) "
             "FROM login_job_items WHERE job_id=?", (job_id,)
         ).fetchone()
-        success, failed, total = counts[0] or 0, counts[1] or 0, counts[2]
-        done = success + failed
+        success, failed, cancelled, total = counts[0] or 0, counts[1] or 0, counts[2] or 0, counts[3]
+        done = success + failed + cancelled
         completed = now if done == total else None
         self.conn.execute(
-            "UPDATE login_jobs SET success_count=?,failed_count=?,status=?,completed_at=CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END WHERE id=?",
-            (success, failed, "completed" if done == total else "running", completed, completed, job_id),
+            "UPDATE login_jobs SET success_count=?,failed_count=?,cancelled_count=?,status=?,completed_at=CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END WHERE id=?",
+            (success, failed, cancelled, "completed" if done == total else "running", completed, completed, job_id),
         )
 
     def register_worker(self, worker_id: str, name: str = "", version: str = "") -> dict:
@@ -335,8 +356,12 @@ class Database:
                 return None
             if job["status"] in {"completed", "cancelled"}:
                 return job
-            self.conn.execute("UPDATE login_job_items SET status='cancelled',completed_at=? WHERE job_id=? AND status IN ('queued','retryable','running')", (utc_now(), job_id))
-            self.conn.execute("UPDATE login_jobs SET status='cancelled',completed_at=? WHERE id=?", (utc_now(), job_id))
+            item_rows = self.conn.execute("SELECT id,account_id FROM login_job_items WHERE job_id=? AND status IN ('queued','retryable','running')", (job_id,)).fetchall()
+            now = utc_now()
+            self.conn.execute("UPDATE login_job_items SET status='cancelled',completed_at=? WHERE job_id=? AND status IN ('queued','retryable','running')", (now, job_id))
+            for row in item_rows:
+                self.record_log("account_cancelled", "任务被取消，账号未完成执行", job_id=job_id, job_item_id=row[0], account_id=row[1], level="WARNING")
+            self.conn.execute("UPDATE login_jobs SET status='cancelled',cancelled_count=cancelled_count+?,completed_at=? WHERE id=?", (len(item_rows), now, job_id))
             self.record_log("job_cancelled", "任务被取消", job_id=job_id, level="WARNING")
             return self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
 

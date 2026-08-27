@@ -11,6 +11,7 @@
 - 文档：README 已描述 Cloud/Worker/SQLite/回调/Lark 闭环、三份配置的职责与回调方向、协议版本、Worker ID/并发、Linux 监听与反向代理前提，以及 Windows 部署路径模板。
 - 部署状态：Linux Cloud 已部署到 `/root/binance-captcha-analyzer`，由 `binance-cloud.service` 管理并监听 `0.0.0.0:8001`；公网健康接口已验证。Linux 专用 `config/cloud.json` 的回调地址为 `http://62.169.26.83:8001/api/worker/callback`，Linux 到 Windows Worker `43.165.177.157:8100` 的健康接口已验证，协议版本为 `1`。
 - 凭证时间字段已统一为 `credential_exported_at`，表示本次从浏览器 Context 导出 Cookie/CSRF 的 UTC 时间；不再读取或保存 Cookie 内部 `expires`，也不再使用 `cookie_expires_at`、`credential_updated_at`。当前测试阶段数据库无历史数据，SQLite 直接按新 schema 创建；该字段只用于凭证新旧回调覆盖判断，不代表 Cookie 过期时间。
+- 任务组连续失败停止阈值由 `config/cloud.json.consecutive_failure_limit` 配置；Linux 达到阈值后取消任务组未完成明细并发送一次 Lark 告警，Windows 通过取消状态停止后续账号。
 
 ## 架构约定
 

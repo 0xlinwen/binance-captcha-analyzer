@@ -6,6 +6,26 @@ from binance_cloud.database import Database
 
 
 class CloudDatabaseTests(unittest.TestCase):
+    def test_task_group_cancels_pending_items_after_failure_threshold(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            group = db.create_task_group()
+            job = db.create_job([{"email": f"{i}@example.com", "password": "pw"} for i in range(6)], task_group_id=group["id"])
+            items = db.get_job(job["id"])["items"]
+            for item in items[:5]:
+                db.mark_items_running(job["id"], "worker", 60)
+                db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                                  "worker_id": "worker", "status": "failed", "error_code": "login_failed"})
+            self.assertTrue(db.claim_task_group_failure_alert(group["id"], 5))
+            db.cancel_task_group(group["id"])
+            self.assertEqual({item["status"] for item in db.get_job(job["id"])["items"]}, {"cancelled", "failed"})
+            self.assertEqual(db.task_group(group["id"])["status"], "cancelled")
+            current_job = db.get_job(job["id"])
+            self.assertEqual(current_job["failed_count"], 5)
+            self.assertEqual(current_job["cancelled_count"], 1)
+            self.assertEqual(db.task_group(group["id"])["cancelled_count"], 1)
+            self.assertEqual(len([row for row in db.logs(job["id"]) if row["event"] == "account_cancelled"]), 1)
+
     def test_cookie_text_and_idempotent_callback(self):
         with TemporaryDirectory() as temp:
             db = Database(Path(temp) / "state.db")
