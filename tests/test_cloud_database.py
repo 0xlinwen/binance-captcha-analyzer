@@ -6,6 +6,143 @@ from binance_cloud.linux.database import Database
 
 
 class CloudDatabaseTests(unittest.TestCase):
+    def test_proxy_pool_lease_uses_current_entry_and_releases_idempotently(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "a@example.com", "password": "pw"}])
+            item = db.get_job(job["id"])["items"][0]
+            entries = db.configure_proxy_pool("registration", ["socks5://one:1000", "socks5://two:1000"])
+            self.assertEqual(entries[0]["status"], "active")
+            lease = db.acquire_proxy_lease("registration", job["id"], item["id"], "windows-01", 60, dispatch_sequence=1)
+            self.assertEqual(lease["proxy_entry_id"], "registration:0")
+            self.assertEqual(lease["state"], "assigned")
+            bound_item = db.get_job(job["id"])["items"][0]
+            self.assertEqual(bound_item["lease_id"], lease["lease_id"])
+            self.assertEqual(bound_item["proxy_entry_id"], "registration:0")
+            with self.assertRaisesRegex(ValueError, "未释放"):
+                db.acquire_proxy_lease("registration", job["id"], item["id"], "windows-01", 60)
+
+            released = db.release_proxy_lease(lease["lease_id"], result_status="proxy_failed")
+            self.assertEqual(released["state"], "released")
+            db.release_proxy_lease(lease["lease_id"], result_status="proxy_failed")
+            entry = db._one("SELECT * FROM proxy_pool_entries WHERE id=?", ("registration:0",))
+            self.assertEqual(entry["active_count"], 0)
+            self.assertEqual(entry["consecutive_failures"], 1)
+
+    def test_callback_releases_matching_proxy_lease_and_rejects_mismatch(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "a@example.com", "password": "pw"}])
+            item = db.get_job(job["id"])["items"][0]
+            db.configure_proxy_pool("registration", ["socks5://one:1000"])
+            lease = db.acquire_proxy_lease("registration", job["id"], item["id"], "windows-01", 60)
+            with self.assertRaisesRegex(ValueError, "租约不匹配"):
+                db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                                  "worker_id": "windows-01", "status": "failed", "lease_id": "wrong"})
+            db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                              "worker_id": "windows-01", "status": "failed", "lease_id": lease["lease_id"],
+                              "proxy_entry_id": lease["proxy_entry_id"]})
+            stored = db._one("SELECT * FROM proxy_leases WHERE lease_id=?", (lease["lease_id"],))
+            self.assertEqual(stored["state"], "released")
+
+    def test_proxy_pool_reconfiguration_disables_removed_entry_without_deleting_lease(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "a@example.com", "password": "pw"}])
+            item = db.get_job(job["id"])["items"][0]
+            db.configure_proxy_pool("registration", ["socks5://one:1000", "socks5://two:1000"])
+            lease = db.acquire_proxy_lease("registration", job["id"], item["id"], "windows-01", 60)
+            entries = db.configure_proxy_pool("registration", ["socks5://one:1000"])
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[1]["status"], "disabled")
+            self.assertEqual(db._one("SELECT lease_id FROM proxy_leases WHERE lease_id=?", (lease["lease_id"],))["lease_id"], lease["lease_id"])
+
+    def test_dynamic_job_keeps_dynamic_profile_in_worker_payload(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "a@example.com", "password": "pw"}], {"mode": "dynamic", "proxy_profile": "dynamic"})
+            payload = db.worker_payload(job["id"])
+            self.assertEqual(payload["proxy"]["mode"], "dynamic")
+            self.assertEqual(payload["proxy_profile"], "dynamic")
+
+    def test_rotating_pool_switches_only_after_final_proxy_failures(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            accounts = [{"email": f"pool-{i}@example.com", "password": "pw"} for i in range(5)]
+            job = db.create_job(accounts, {"mode": "rotating_single_ip", "proxy_profile": "rotating_single_ip"})
+            db.configure_proxy_pool("default", ["socks5://one:1000", "socks5://two:1000"], switch_threshold=5)
+            db.conn.execute("UPDATE login_job_items SET max_retries=1,proxy_retry_count=1 WHERE job_id=?", (job["id"],))
+            for item in db.get_job(job["id"])["items"]:
+                payload = db.rotating_worker_payload(job["id"], "worker", 60)
+                self.assertIsNotNone(payload)
+                current = payload["accounts"][0]
+                db.save_callback({"job_id": job["id"], "job_item_id": current["job_item_id"], "account_id": current["account_id"],
+                                  "worker_id": "worker", "status": "proxy_failed", "lease_id": current["lease_id"],
+                                  "proxy_entry_id": current["proxy_entry_id"]})
+            first = db._one("SELECT * FROM proxy_pool_entries WHERE id='default:0'")
+            second = db._one("SELECT * FROM proxy_pool_entries WHERE id='default:1'")
+            self.assertEqual(first["status"], "cooling")
+            self.assertEqual(second["status"], "active")
+
+    def test_rotating_pool_payload_binds_address_to_single_account(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "pool@example.com", "password": "pw"}], {"mode": "rotating_single_ip"})
+            db.configure_proxy_pool("default", ["socks5://one:1000"])
+            payload = db.rotating_worker_payload(job["id"], "worker", 60)
+            self.assertEqual(payload["proxy"]["mode"], "fixed")
+            self.assertEqual(payload["proxy"]["address"], "socks5://one:1000")
+            self.assertEqual(len(payload["accounts"]), 1)
+
+    def test_active_ip_is_not_reused_while_another_lease_is_running(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": f"parallel-{i}@example.com", "password": "pw"} for i in range(2)], {"mode": "rotating_single_ip"})
+            db.configure_proxy_pool("default", ["socks5://one:1000", "socks5://two:1000"])
+            first = db.rotating_worker_payload(job["id"], "worker-1", 60)
+            second = db.rotating_worker_payload(job["id"], "worker-2", 60)
+            self.assertNotEqual(first["accounts"][0]["proxy_entry_id"], second["accounts"][0]["proxy_entry_id"])
+
+    def test_worker_slots_are_reserved_and_released(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            db.register_worker("worker", version="1")
+            db.set_worker_capacity("worker", 2)
+            self.assertTrue(db.reserve_worker_slot("worker"))
+            self.assertTrue(db.reserve_worker_slot("worker"))
+            self.assertFalse(db.reserve_worker_slot("worker"))
+            self.assertEqual(db._one("SELECT active_slots FROM worker_nodes WHERE id='worker'")["active_slots"], 2)
+            db.release_worker_slot("worker")
+            self.assertTrue(db.reserve_worker_slot("worker"))
+
+    def test_job_diagnostics_contains_correlation_and_redacts_proxy_credentials(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "diag@example.com", "password": "pw"}], {"mode": "fixed", "address": "socks5://user:secret@127.0.0.1:1080", "max_accounts_per_job": 1})
+            item = db.get_job(job["id"])["items"][0]
+            db.mark_items_running(job["id"], "worker-1", 60)
+            db.save_callback({"job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                              "worker_id": "worker-1", "status": "failed", "error_code": "login_failed",
+                              "error_message": "页面认证失败", "proxy_profile": "static", "dispatch_sequence": 2})
+            value = db.job_diagnostics(job["id"])
+            self.assertEqual(value["summary"]["failed"], 1)
+            self.assertEqual(value["items"][0]["error_code"], "login_failed")
+            self.assertIn("callback_received", [row["event"] for row in value["recent_logs"]])
+            self.assertNotIn("secret", str(value))
+
+    def test_failed_ip_enters_cooling_for_24_hours(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "cooling@example.com", "password": "pw"}], {"mode": "rotating_single_ip"})
+            db.configure_proxy_pool("default", ["socks5://one:1000"], switch_threshold=1)
+            db.conn.execute("UPDATE login_job_items SET max_retries=1,proxy_retry_count=1 WHERE job_id=?", (job["id"],))
+            payload = db.rotating_worker_payload(job["id"], "worker", 60)
+            account = payload["accounts"][0]
+            db.save_callback({"job_id": job["id"], "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": "worker", "status": "proxy_failed", "lease_id": account["lease_id"], "proxy_entry_id": account["proxy_entry_id"]})
+            entry = db._one("SELECT * FROM proxy_pool_entries WHERE id='default:0'")
+            self.assertEqual(entry["status"], "cooling")
+            self.assertTrue(entry["cooldown_until"])
+
     def test_task_group_cancels_pending_items_after_failure_threshold(self):
         with TemporaryDirectory() as temp:
             db = Database(Path(temp) / "state.db")
@@ -38,6 +175,46 @@ class CloudDatabaseTests(unittest.TestCase):
             credential = db.credential(item["account_id"])
             self.assertEqual(len(credential["cookie"]), 6002)
             self.assertEqual(db.get_job(job["id"])["success_count"], 1)
+
+    def test_migrates_legacy_credentials_table(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "state.db"
+            import sqlite3
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE accounts (
+                  id INTEGER PRIMARY KEY,
+                  email TEXT NOT NULL UNIQUE,
+                  password TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO accounts(id,email,password,created_at,updated_at)
+                VALUES(1,'legacy@example.com','pw','2026-08-27T00:00:00+00:00','2026-08-27T02:00:00+00:00');
+                CREATE TABLE credentials (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  account_id INTEGER NOT NULL UNIQUE,
+                  cookie TEXT NOT NULL,
+                  csrftoken TEXT,
+                  cookie_expires_at TEXT,
+                  credential_updated_at TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO credentials(account_id,cookie,csrftoken,cookie_expires_at,credential_updated_at,created_at,updated_at)
+                VALUES(1,'legacy-cookie','legacy-token','2026-09-01T00:00:00+00:00','2026-08-27T01:00:00+00:00','2026-08-27T00:00:00+00:00','2026-08-27T02:00:00+00:00');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            db = Database(path)
+            credential = db.credential(1)
+            self.assertEqual(credential["credential_exported_at"], "2026-08-27T01:00:00+00:00")
+            self.assertNotIn("cookie_expires_at", credential)
+            self.assertNotIn("credential_updated_at", credential)
+            db.close()
 
     def test_fixed_proxy_quota_is_per_job(self):
         with TemporaryDirectory() as temp:

@@ -18,6 +18,26 @@ class CloudWorkerConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             worker._config_for_task({"mode": "direct"}, "unknown")
 
+    def test_dynamic_task_requires_local_dynamic_profile(self):
+        with patch("binance_cloud.windows.worker.load_config", return_value={"proxy": {"enabled": True, "mode": "static"}, "mode": "login"}):
+            worker.CONFIG = None
+            with self.assertRaisesRegex(ValueError, "dynamic profile"):
+                worker._config_for_task({"mode": "dynamic"}, "login")
+
+    def test_lease_metadata_requires_entry_and_profile(self):
+        with self.assertRaisesRegex(ValueError, "proxy_entry_id"):
+            worker._validate_lease_metadata(
+                {"proxy": {"mode": "direct"}},
+                {"lease_id": "lease-1"},
+                {"mode": "direct"},
+            )
+        metadata = worker._validate_lease_metadata(
+            {"proxy": {"mode": "direct"}, "proxy_profile": "direct"},
+            {"lease_id": "lease-1", "proxy_entry_id": "direct"},
+            {"mode": "direct"},
+        )
+        self.assertEqual(metadata["lease_id"], "lease-1")
+
 
 if __name__ == "__main__":
     unittest.main()

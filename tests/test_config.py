@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from binance_analyzer.config import load_config
+from binance_analyzer.config import load_config, load_proxy_pool
 
 
 def _write_config(base_dir: Path, **overrides):
@@ -50,6 +50,59 @@ def _write_config(base_dir: Path, **overrides):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_load_proxy_pool_preserves_order_and_ignores_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            pool_path = base_dir / "config" / "proxy_pool.txt"
+            pool_path.parent.mkdir()
+            pool_path.write_text("# first\nsocks5://one:1000\n\nhttp://two:2000\n", encoding="utf-8")
+            document = {"profiles": {"rotating_single_ip": {"mode": "rotating_single_ip", "pool_file": "config/proxy_pool.txt", "switch_after_consecutive_account_failures": 5}}}
+            pool = load_proxy_pool(base_dir, document)
+            self.assertEqual(pool["pool_id"], "default")
+            self.assertEqual(pool["addresses"], ["socks5://one:1000", "http://two:2000"])
+    def test_load_config_merges_independent_proxy_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(
+                base_dir,
+                proxy={
+                    "enabled": True,
+                    "proxy_profile": "dynamic",
+                    "bootstrap": {"host": "82.22.69.12", "port": 7219},
+                },
+            )
+            (base_dir / "config" / "proxy.json").write_text(
+                json.dumps({
+                    "profiles": {
+                        "dynamic": {
+                            "mode": "dynamic",
+                            "api_url": "https://proxy.example/generate",
+                            "bootstrap_ref": "automation.proxy.bootstrap",
+                        },
+                    },
+                    "gost": {"binary": "gost", "listen_port": 0},
+                }),
+                encoding="utf-8",
+            )
+
+            config = load_config(base_dir)
+
+            self.assertEqual(config["proxy"]["mode"], "dynamic")
+            self.assertEqual(config["proxy"]["api_url"], "https://proxy.example/generate")
+            self.assertEqual(config["proxy"]["bootstrap"]["host"], "82.22.69.12")
+
+    def test_load_config_rejects_dynamic_profile_without_automation_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir, proxy={"enabled": True, "proxy_profile": "dynamic"})
+            (base_dir / "config" / "proxy.json").write_text(
+                json.dumps({"profiles": {"dynamic": {"mode": "dynamic", "bootstrap_ref": "automation.proxy.bootstrap"}}}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "白名单出口"):
+                load_config(base_dir)
+
     def test_load_config_uses_automation_config_not_root_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)

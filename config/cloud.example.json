@@ -4,6 +4,13 @@
   "windows_worker_url": "http://windows.example.com:8100",
   "callback_url": "https://linux.example.com/api/worker/callback",
   "task_lease_seconds": 1800,
-  "consecutive_failure_limit": 5,
+  "failure_policy": {
+    "fixed_pool": {"account_failures_before_switch": 3, "failed_ips_before_stop": 5, "cooldown_seconds": 86400},
+    "dynamic": {"account_failures_before_stop": 5},
+    "static": {"account_failures_before_stop": 5},
+    "direct": {"account_failures_before_stop": 5},
+    "notify_lark": true
+  },
+  "proxy_config_path": "config/proxy.json",
   "lark": {"webhook_url": ""}
 }

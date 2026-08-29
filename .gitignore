@@ -29,5 +29,6 @@ artifacts/
 config.json
 config/*.json
 !config/*.example.json
+config/proxy_pool.txt
 accounts.txt
 logs/

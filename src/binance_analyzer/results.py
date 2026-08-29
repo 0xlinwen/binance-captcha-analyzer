@@ -88,6 +88,17 @@ class AutomationResult:
 
     @classmethod
     def from_status(cls, status: AccountStatus, *, message: str | None = None) -> "AutomationResult":
+        if message is None and status is not AccountStatus.SUCCESS:
+            message = {
+                AccountStatus.FAILED: "自动化流程失败",
+                AccountStatus.AUTH_FAILED: "平台认证失败",
+                AccountStatus.IMAP_AUTH_FAILED: "邮箱 IMAP 认证失败",
+                AccountStatus.EMAIL_VERIFICATION_REQUIRED: "停留在邮箱验证码页面",
+                AccountStatus.PROXY_FAILED: "代理连接失败",
+                AccountStatus.RATE_LIMITED: "请求受到平台风控限制",
+                AccountStatus.ALREADY_REGISTERED: "账号已注册",
+                AccountStatus.NEED_REGISTER: "账号尚未注册",
+            }.get(status, status.value)
         return cls(
             status=status,
             error_code=None if status is AccountStatus.SUCCESS else status.value,

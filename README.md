@@ -240,6 +240,10 @@ Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
 
 Windows `config/worker.json` 可设置 `worker_max_workers` 控制同一任务内的账号并发数，
 例如 `2` 表示该 Windows Worker 全部任务最多同时执行两个账号，其余账号排队；默认值为 `1`（串行）。
+固定代理池任务采用逐账号派发：Linux 每次只领取一个 job item，创建一个代理 lease，并以单账号 payload
+独立 `POST /worker/execute-login`。例如 10 个账号、2 个线程时，首轮派发账号 1 和 2；任一账号完成并回调后释放对应槽位，
+Linux 在维护循环（当前约 60 秒一次）中领取账号 3、4……继续补位，不是把 10 个账号预先切成两个固定批次，也不是一次 POST 全部账号。
+实际完成/回调顺序由浏览器耗时决定，不保证账号提交顺序。
 Linux 每次派发前会检查 Windows `/health` 的 `protocol_version`，并在任务请求中携带相同版本；版本不一致时任务不执行并记录为派发失败。Linux 与 Windows 必须部署同一版本代码。
 版本不兼容时，如果 Linux `config/cloud.json` 配置了 `lark.webhook_url`，Linux 会发送一次系统告警；未配置时不发送外部通知，但错误会写入任务状态和执行日志，任务仍按重试策略处理。
 
@@ -277,11 +281,15 @@ curl http://127.0.0.1:8100/health
 
 接口闭环为 `POST /api/login-jobs` -> Windows `POST /worker/execute-login` -> Linux `POST /api/worker/callback`。请求体的 `mode` 可选 `login` 或 `register`，同一 Worker 可并行处理两种独立流程；当前服务入口使用 SQLite，长字段（Cookie、密码、Token）使用 `TEXT`；Windows Worker 复用现有 `register_account` 流程。
 
+失败回调会包含 `error_code` 和 `error_message`：状态机返回明确状态但没有额外异常时使用该状态的固定说明；浏览器、验证码、邮箱或凭证导出异常会保留具体异常消息。Cloud 会把这两个字段写入任务明细和执行日志，便于不登录服务器也能定位失败类别。历史任务已经写入的空错误字段不会被补写，修复仅对更新后的 Worker 新任务生效。
+
 当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须在 `config/cloud.json` 配置 `windows_worker_url` 与 `callback_url`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
 
 Windows 在回调前会把结果写入 `data/runtime/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_exported_at`（本次从浏览器导出的时间），Linux 只接受较新的凭证，避免重新登录后的旧回调迟到并覆盖新 Cookie。该字段不是 Cookie 过期时间；当前系统不提供后台 Cookie 在线有效性检查。
 
 附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
+
+排查任务时优先请求 `GET /api/login-jobs/{id}/diagnostics`：返回任务/任务组汇总、每个账号的状态与 `error_code/error_message`、Worker/租约/代理 entry、代理使用计数和最近 50 条执行日志；代理 URI 中的用户名和密码会被遮蔽。`GET /api/workers` 的每个 Worker 还会返回 `active_items`，可直接看到各浏览器当前执行的任务明细。回调日志会带上 `status`、错误码、代理 entry、租约和 dispatch 序号，便于按任务明细串联 Linux 与 Windows 日志。
 
 ### Windows PowerShell
 
@@ -359,7 +367,12 @@ Linux 派发的任务会在请求中携带 `cloud.json.callback_url`，因此生
   "windows_worker_url": "http://Windows公网IP:8100", // Linux 能访问的 Worker 地址
   "callback_url": "https://Linux域名/api/worker/callback", // Windows 能访问的 Linux 回调地址
   "task_lease_seconds": 1800, // Worker 心跳租约秒数
-  "consecutive_failure_limit": 5, // 任务组连续失败多少个账号后停止
+  "failure_policy": {
+    "fixed_pool": {"account_failures_before_switch": 3, "failed_ips_before_stop": 5, "cooldown_seconds": 86400},
+    "dynamic": {"account_failures_before_stop": 5},
+    "direct": {"account_failures_before_stop": 5},
+    "notify_lark": true
+  },
   "lark": {"webhook_url": ""} // 可选：全局任务告警和完成通知
 }
 ```
@@ -404,7 +417,6 @@ Linux 派发的任务会在请求中携带 `cloud.json.callback_url`，因此生
   // === 代理 ===
   "proxy": {
     "enabled": false,
-    "used_ips_file": "data/runtime/used_proxy_ips.txt",
     "mode": "dynamic",                     // dynamic / static
     "api_url": "https://proxy-api.example.com/gen?region=JP&count=1&proto=http",  // 动态 IP API
     "timeout_seconds": 15,
@@ -508,7 +520,7 @@ PYTHONPATH=src python -m binance_cloud.tools.batch_submit \
 }
 ```
 
-任务组连续失败达到 `config/cloud.json` 的 `consecutive_failure_limit` 后，Linux 会取消该任务组所有尚未完成的账号并发送一次 Lark 告警；已经开始执行的账号会在当前流程结束后回调，后续账号不再启动。任务和任务组分别记录 `success_count`、`failed_count`、`cancelled_count`，取消账号还会写入单独的 `account_cancelled` 执行日志。全部账号完成只发送一次汇总通知；单账号任务不发送通知。通知由 Linux API 统一发送，Webhook 不从命令行传入。
+固定池连续失败 IP 数达到 `config/cloud.json.failure_policy.fixed_pool.failed_ips_before_stop`，动态/直连连续账号失败达到各自阈值后，Linux 会取消任务组未完成账号并发送 Lark 告警。固定池单 IP 切换阈值是 `account_failures_before_switch`。也可通过 Linux 的 `POST /api/proxy-pools/{pool_id}/policy` 运行时修改策略（配置了 `BINANCE_WORKER_TOKEN` 时需在请求头携带同一 token）。已经开始执行的账号会在当前流程结束后回调，后续账号不再启动。任务和任务组分别记录 `success_count`、`failed_count`、`cancelled_count`，取消账号还会写入单独的 `account_cancelled` 执行日志。全部账号完成只发送一次汇总通知；单账号任务不发送通知。通知由 Linux API 统一发送，Webhook 不从命令行传入。
 `--timeout-seconds` 是批量客户端的整体等待上限，超时后命令退出，但 Linux 中已创建的任务继续运行。接口请求可提供 `idempotency_key`，同一键重复提交会返回原任务，不重复创建账号任务。
 
 ```bash
