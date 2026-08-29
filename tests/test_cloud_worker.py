@@ -1,4 +1,7 @@
 import unittest
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from binance_cloud.windows import worker
@@ -37,6 +40,23 @@ class CloudWorkerConfigTests(unittest.TestCase):
             {"mode": "direct"},
         )
         self.assertEqual(metadata["lease_id"], "lease-1")
+
+    def test_concurrency_update_persists_and_validates(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "worker.json").write_text(json.dumps({"protocol_version": "1", "worker_id": "w", "callback_url": "", "worker_max_workers": 1}), encoding="utf-8")
+            with patch.object(worker, "BASE_DIR", root):
+                result = worker._set_worker_concurrency(2)
+            self.assertEqual(result["previous_worker_max_workers"], 1)
+            self.assertEqual(json.loads((config_dir / "worker.json").read_text())["worker_max_workers"], 2)
+            with self.assertRaises(ValueError):
+                worker._set_worker_concurrency(0)
+
+    def test_concurrency_payload_requires_worker_id(self):
+        with self.assertRaises(Exception):
+            worker.ConcurrencyUpdate(worker_max_workers=2)
 
 
 if __name__ == "__main__":

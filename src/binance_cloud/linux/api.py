@@ -524,6 +524,33 @@ def workers():
     return db.workers()
 
 
+@app.patch("/api/workers/{worker_id}/concurrency")
+def update_worker_concurrency(worker_id: str, request: dict, x_worker_token: str | None = Header(default=None)):
+    """由 Cloud 转发 Worker 并发热更新，并在成功后同步 SQLite 容量。"""
+    _auth(x_worker_token, WORKER_TOKEN, "Cloud")
+    request_worker_id = request.get("worker_id") if isinstance(request, dict) else None
+    if request_worker_id != worker_id:
+        raise HTTPException(400, "路径 worker_id 必须与请求体 worker_id 一致")
+    value = request.get("worker_max_workers") if isinstance(request, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise HTTPException(400, "worker_max_workers 必须是正整数")
+    try:
+        response = requests.patch(
+            f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/config/concurrency",
+            json={"worker_id": worker_id, "worker_max_workers": value},
+            headers={"X-Worker-Token": WORKER_TOKEN} if WORKER_TOKEN else {},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        db.set_worker_capacity(worker_id, value)
+        db.record_log("worker_concurrency_updated", f"worker={worker_id} worker_max_workers={value}", worker_id=worker_id)
+        return {"status": "updated", "worker_id": worker_id, "worker_max_workers": value, "worker": result}
+    except requests.RequestException as exc:
+        db.record_log("worker_concurrency_update_failed", str(exc), worker_id=worker_id, level="ERROR")
+        raise HTTPException(502, f"Worker 并发热更新失败: {exc}") from exc
+
+
 @app.get("/api/login-jobs/{job_id}/logs")
 def logs(job_id: str):
     if not db.get_job(job_id):

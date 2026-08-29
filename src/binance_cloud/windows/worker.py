@@ -12,6 +12,7 @@ from pathlib import Path
 import requests
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel, Field
 
 from binance_analyzer.config import load_config
 from binance_analyzer.automation.orchestrator import register_account
@@ -28,6 +29,7 @@ CALLBACK_OUTBOX = CallbackOutbox(BASE_DIR / "data" / "runtime" / "callback_outbo
 ACCOUNT_EXECUTOR: ThreadPoolExecutor | None = None
 ACCOUNT_EXECUTOR_SIZE: int | None = None
 ACCOUNT_EXECUTOR_LOCK = threading.Lock()
+ACCOUNT_EXECUTOR_GENERATIONS = 0
 
 
 def _worker_config() -> dict:
@@ -40,6 +42,9 @@ def _worker_config() -> dict:
     for key in ("protocol_version", "worker_id", "callback_url"):
         if not isinstance(data.get(key), str) or (key != "callback_url" and not data[key].strip()):
             raise ValueError(f"config/worker.json 缺少 {key}")
+    capacity = data.get("worker_max_workers", 1)
+    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+        raise ValueError("config/worker.json 的 worker_max_workers 必须是正整数")
     return data
 
 
@@ -115,6 +120,30 @@ def _account_executor(max_workers: int) -> ThreadPoolExecutor:
         elif ACCOUNT_EXECUTOR_SIZE != max_workers:
             raise ValueError("worker_max_workers 只能在 Worker 启动前配置")
         return ACCOUNT_EXECUTOR
+
+
+def _set_worker_concurrency(max_workers: int) -> dict:
+    """热替换账号线程池；旧线程池继续排空，避免中断已接收任务。"""
+    global ACCOUNT_EXECUTOR, ACCOUNT_EXECUTOR_SIZE, ACCOUNT_EXECUTOR_GENERATIONS
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers <= 0:
+        raise ValueError("worker_max_workers 必须是正整数")
+    path = BASE_DIR / "config" / "worker.json"
+    with ACCOUNT_EXECUTOR_LOCK:
+        data = _worker_config()
+        previous = int(data.get("worker_max_workers", 1))
+        data["worker_max_workers"] = max_workers
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        if ACCOUNT_EXECUTOR is not None and ACCOUNT_EXECUTOR_SIZE != max_workers:
+            # 不取消旧队列；旧 payload 会在原线程池中完成，新 payload 使用新线程池。
+            # 不立即 shutdown：execute 可能刚在锁外拿到旧池并准备 submit，立即关闭会造成竞态提交失败。
+            # 旧池没有新任务引用后会在线程结束时自然退出。
+            ACCOUNT_EXECUTOR = None
+            ACCOUNT_EXECUTOR_SIZE = None
+        ACCOUNT_EXECUTOR_GENERATIONS += 1
+        return {"worker_max_workers": max_workers, "previous_worker_max_workers": previous,
+                "executor_generation": ACCOUNT_EXECUTOR_GENERATIONS}
 
 
 def _post_callback(url: str, payload: dict) -> bool:
@@ -228,6 +257,24 @@ def health():
     if max_workers <= 0:
         raise ValueError("worker_max_workers 必须是正整数")
     return {"status": "ok", "worker_id": config["worker_id"], "protocol_version": config["protocol_version"], "worker_max_workers": max_workers}
+
+
+class ConcurrencyUpdate(BaseModel):
+    worker_id: str = Field(min_length=1)
+    worker_max_workers: int = Field(gt=0)
+
+
+@app.patch("/worker/config/concurrency")
+def update_concurrency(request: ConcurrencyUpdate, x_worker_token: str | None = Header(default=None)):
+    if WORKER_TOKEN and x_worker_token != WORKER_TOKEN:
+        raise HTTPException(401, "Worker token 无效")
+    try:
+        configured_worker_id = _worker_config()["worker_id"]
+        if request.worker_id != configured_worker_id:
+            raise HTTPException(409, f"worker_id 不匹配: target={configured_worker_id}")
+        return {"status": "updated", **_set_worker_concurrency(request.worker_max_workers)}
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _protocol_version() -> str:
