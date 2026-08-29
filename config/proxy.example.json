@@ -1,0 +1,39 @@
+{
+  "profiles": {
+    "direct": {
+      "mode": "direct"
+    },
+    "static": {
+      "mode": "static",
+      "static": {
+        "scheme": "socks5",
+        "host": "proxy.example.com",
+        "port": 10000,
+        "username": "",
+        "password": ""
+      }
+    },
+    "rotating_single_ip": {
+      "mode": "rotating_single_ip",
+      "pool_file": "config/proxy_pool.txt",
+      "cooldown_seconds": 86400,
+      "allow_parallel": false
+    },
+    "dynamic": {
+      "mode": "dynamic",
+      "api_url": "https://proxy-api.example.com/generate",
+      "timeout_seconds": 15,
+      "check_timeout_seconds": 15,
+      "proxy_quality_check_enabled": true,
+      "proxy_quality_check_timeout_seconds": 10,
+      "proxy_quality_check_max_latency_ms": 2500,
+      "proxy_quality_check_url": "https://accounts.binance.com/zh-CN/login",
+      "bootstrap": {"scheme": "socks5", "host": "proxy-bootstrap.example.com", "port": 10000, "username": "", "password": ""}
+    }
+  },
+  "gost": {
+    "binary": "gost",
+    "listen_host": "127.0.0.1",
+    "listen_port": 0
+  }
+}

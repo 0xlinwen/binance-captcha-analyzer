@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
+from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Header
 
 from binance_analyzer.config import load_config
@@ -56,19 +57,53 @@ def _config_for_task(proxy: dict, mode: str) -> dict:
         configured["enabled"] = False
     elif proxy_mode == "fixed":
         address = str(proxy.get("address") or "")
-        if "://" in address:
-            address = address.split("://", 1)[1]
-        host, sep, port = address.rpartition(":")
-        if not sep or not host or not port:
+        parsed = urlparse(address if "://" in address else f"socks5://{address}")
+        if not parsed.hostname or not parsed.port:
             raise ValueError("固定代理 address 必须是 host:port 或 scheme://host:port")
         static = dict(configured.get("static") or {})
-        static.update({"host": host, "port": port})
+        static.update({"scheme": parsed.scheme, "host": parsed.hostname, "port": parsed.port})
+        if parsed.username is not None:
+            static["username"] = parsed.username
+        if parsed.password is not None:
+            static["password"] = parsed.password
         configured.update({"enabled": True, "mode": "static", "static": static})
+    elif proxy_mode == "dynamic":
+        if str(configured.get("mode") or "").strip().lower() != "dynamic":
+            raise ValueError("动态任务要求 Worker automation.json/proxy.json 配置 dynamic profile")
+        configured["enabled"] = True
     else:
-        raise ValueError("proxy.mode 只支持 direct/fixed")
+        raise ValueError("proxy.mode 只支持 direct/fixed/dynamic")
     config["proxy"] = configured
     config["mode"] = task_mode
     return config
+
+
+def _lease_metadata(payload: dict, account: dict) -> dict:
+    """提取账号级租约标识；旧批量 payload 没有这些字段时保持兼容。"""
+    return {
+        "lease_id": account.get("lease_id") or payload.get("lease_id"),
+        "proxy_entry_id": account.get("proxy_entry_id") or payload.get("proxy_entry_id"),
+        "dispatch_sequence": account.get("dispatch_sequence") or payload.get("dispatch_sequence"),
+        "proxy_profile": payload.get("proxy_profile"),
+    }
+
+
+def _validate_lease_metadata(payload: dict, account: dict, proxy: dict) -> dict:
+    metadata = _lease_metadata(payload, account)
+    profile = str(metadata.get("proxy_profile") or "").strip().lower()
+    if profile == "rotating_single_ip" and (not metadata["lease_id"] or not metadata["proxy_entry_id"]):
+        raise ValueError("固定池任务必须携带 lease_id 和 proxy_entry_id")
+    if metadata["lease_id"]:
+        if not metadata["proxy_entry_id"]:
+            raise ValueError("代理租约缺少 proxy_entry_id")
+        if not metadata["proxy_profile"]:
+            raise ValueError("代理租约缺少 proxy_profile")
+        if str(proxy.get("mode") or "direct").strip().lower() != "direct" and not proxy.get("address"):
+            if metadata["proxy_profile"] == "dynamic" and str(proxy.get("mode") or "").strip().lower() != "dynamic":
+                raise ValueError("动态代理租约与任务代理模式不一致")
+        if profile == "rotating_single_ip" and str(proxy.get("mode") or "").strip().lower() != "fixed":
+            raise ValueError("固定池租约必须使用 fixed 代理地址")
+    return metadata
 
 
 def _account_executor(max_workers: int) -> ThreadPoolExecutor:
@@ -120,6 +155,7 @@ def execute(payload: dict) -> None:
         for account in payload["accounts"]:
             _queue_callback(callback_url, {"job_id": job_id, "job_item_id": account["job_item_id"],
                                             "account_id": account["account_id"], "worker_id": worker_id,
+                                            **_lease_metadata(payload, account),
                                             "status": "failed", "error_code": "worker_config_error",
                                             "error_message": str(exc)})
         return
@@ -134,11 +170,13 @@ def execute(payload: dict) -> None:
             future.result()
         return
     for account in accounts:
+        lease_metadata = _lease_metadata(payload, account)
         email, password = account["email"], account["password"]
         if account.get("client_id") and account.get("refresh_token") and "----" not in password:
             password = f"{password}----{account['client_id']}----{account['refresh_token']}"
         heartbeat_stop = threading.Event()
         try:
+            lease_metadata = _validate_lease_metadata(payload, account, payload.get("proxy") or {})
             debug_mode = bool(worker_config.get("debug_mode", False))
             if not debug_mode:
                 state_response = requests.get(callback_base + f"/api/login-jobs/{job_id}/status", headers=headers, timeout=20)
@@ -167,14 +205,16 @@ def execute(payload: dict) -> None:
             else:
                 callback_status = status.value if status.value in {"success", "failed", "proxy_failed", "rate_limited"} else "failed"
                 callback_error_code = None if callback_status == "success" else (getattr(automation_result, "error_code", None) or status.value)
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id, "status": callback_status,
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id,
+                      **lease_metadata, "status": callback_status,
                       "error_code": callback_error_code,
                       "error_message": "登录成功但未导出凭证" if callback_error_code == "credentials_missing" else getattr(automation_result, "error_message", None)}
             if callback_status == "success":
                 result.update({"cookie": credentials.cookie, "csrftoken": credentials.csrftoken,
                                "credential_exported_at": credentials.credential_exported_at})
         except Exception as exc:
-            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
+            result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id,
+                      **lease_metadata, "status": "failed", "error_code": "worker_error", "error_message": str(exc)}
         finally:
             heartbeat_stop.set()
         if callback_url:
@@ -184,7 +224,10 @@ def execute(payload: dict) -> None:
 @app.get("/health")
 def health():
     config = _worker_config()
-    return {"status": "ok", "worker_id": config["worker_id"], "protocol_version": config["protocol_version"]}
+    max_workers = int(config.get("worker_max_workers", 1))
+    if max_workers <= 0:
+        raise ValueError("worker_max_workers 必须是正整数")
+    return {"status": "ok", "worker_id": config["worker_id"], "protocol_version": config["protocol_version"], "worker_max_workers": max_workers}
 
 
 def _protocol_version() -> str:

@@ -6,7 +6,6 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from .automation_driver import build_driver
-from ..storage.proxy_ip_storage import append_used_proxy_ip, load_used_proxy_ips
 from ..storage.registered_account_storage import save_registered_account
 from ..runtime.local_cache import init_cache_manager
 from ..fingerprint import generate_fingerprint
@@ -32,7 +31,6 @@ from ..storage.credential_export import export_credentials
 from ..runtime.logger import get_logger_manager
 
 PAGE_TIMEOUT = 60000
-DEFAULT_USED_PROXY_IPS_FILE = "data/runtime/used_proxy_ips.txt"
 CACHE_DIR = Path(__file__).resolve().parents[2] / ".browser_cache"
 MASTER_CACHE_DIR = CACHE_DIR / "master"
 
@@ -41,59 +39,6 @@ def _safe_int(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def _resolve_used_proxy_ips_file(proxy_config) -> str:
-    if isinstance(proxy_config, dict):
-        value = str(proxy_config.get("used_ips_file") or "").strip()
-        if value:
-            return value
-    return DEFAULT_USED_PROXY_IPS_FILE
-
-
-def _is_static_proxy_mode(proxy_config) -> bool:
-    """判断代理配置是否为固定静态代理。
-
-    参数:
-        proxy_config: 代理配置字典。
-    返回值:
-        bool: 静态代理返回 True，否则返回 False。
-    """
-    if not isinstance(proxy_config, dict):
-        return False
-    return str(proxy_config.get("mode") or "").strip().lower() == "static"
-
-
-def _extract_runtime_exit_ip(proxy_runtime) -> str:
-    if not isinstance(proxy_runtime, dict):
-        return ""
-
-    exit_ip = str(proxy_runtime.get("exit_ip") or "").strip()
-    if exit_ip:
-        return exit_ip
-
-    final_upstream = proxy_runtime.get("final_upstream") or {}
-    exit_ip = str(final_upstream.get("exit_ip") or "").strip()
-    if exit_ip:
-        return exit_ip
-
-    upstream = proxy_runtime.get("upstream") or {}
-    return str(upstream.get("exit_ip") or "").strip()
-
-
-def _record_used_proxy_ip(base_dir: Path, proxy_config: dict, proxy_runtime, worker_id: int) -> bool:
-    exit_ip = _extract_runtime_exit_ip(proxy_runtime)
-    if not exit_ip:
-        print(f"[Worker-{worker_id}] 警告: 代理已创建但未获取到出口IP，未写入已使用IP文件")
-        return False
-
-    used_ips_file = _resolve_used_proxy_ips_file(proxy_config)
-    appended = append_used_proxy_ip(base_dir, used_ips_file, exit_ip)
-    if appended:
-        print(f"[Worker-{worker_id}] 记录已使用出口IP: {exit_ip}")
-    else:
-        print(f"[Worker-{worker_id}] 出口IP已在使用记录中: {exit_ip}")
-    return appended
 
 
 def _build_account_proxy_config(proxy_config: dict) -> dict:
@@ -113,9 +58,6 @@ def warmup_cache(proxy_config=None, headless=True):
     proxy_settings = None
     base_dir = Path(__file__).resolve().parents[2]
     if proxy_config and proxy_config.get("enabled"):
-        used_ips_file = _resolve_used_proxy_ips_file(proxy_config)
-        is_static_proxy = _is_static_proxy_mode(proxy_config)
-        blocked_exit_ips = set() if is_static_proxy else load_used_proxy_ips(base_dir, used_ips_file)
         proxy_runtime = create_proxy_runtime(
             {
                 "mode": "login",
@@ -124,10 +66,6 @@ def warmup_cache(proxy_config=None, headless=True):
             },
             max_attempts=_safe_int(proxy_config.get("max_attempts", 3), 3),
             skip_check=True,
-            blocked_exit_ips=blocked_exit_ips,
-            blocked_exit_ips_provider=None
-            if is_static_proxy
-            else lambda: load_used_proxy_ips(base_dir, used_ips_file),
             logger=make_proxy_logger("[cache]"),
         )
         proxy_settings = build_proxy_launch_config(proxy_runtime)
@@ -271,7 +209,16 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
     print(f"\n{'='*60}")
     print(f"[Worker-{worker_id}] 开始处理: {email_addr}")
     if proxy_enabled:
-        print(f"[Worker-{worker_id}] 代理: 已启用")
+        proxy_type = str(proxy_config.get("mode") or proxy_config.get("profile") or "unknown").strip().lower()
+        proxy_labels = {
+            "static": "固定(static)",
+            "fixed": "固定(fixed)",
+            "rotating_single_ip": "固定池(rotating_single_ip)",
+            "dynamic": "动态(dynamic)",
+        }
+        print(f"[Worker-{worker_id}] 代理: 已启用 | 类型: {proxy_labels.get(proxy_type, proxy_type)}")
+    else:
+        print(f"[Worker-{worker_id}] 代理: 未启用 | 类型: 直连(direct)")
     print(f"[Worker-{worker_id}] 模式: {mode}")
     print(f"{'='*60}")
 
@@ -293,34 +240,16 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
 
         proxy_settings = None
         if proxy_enabled:
-            used_ips_file = _resolve_used_proxy_ips_file(proxy_config)
-            is_static_proxy = _is_static_proxy_mode(proxy_config)
-            blocked_exit_ips = set() if is_static_proxy else load_used_proxy_ips(base_dir, used_ips_file)
             runtime_config = {**config, "proxy": _build_account_proxy_config(proxy_config)}
             proxy_runtime = create_proxy_runtime(
                 runtime_config,
                 max_attempts=_safe_int(proxy_config.get("max_attempts", 5), 5),
-                blocked_exit_ips=blocked_exit_ips,
-                blocked_exit_ips_provider=None
-                if is_static_proxy
-                else lambda: load_used_proxy_ips(base_dir, used_ips_file),
                 require_exit_ip=True,
                 logger=make_proxy_logger(f"[Worker-{worker_id}]"),
             )
             proxy_settings = build_proxy_launch_config(proxy_runtime)
             if proxy_settings:
                 print(f"[Worker-{worker_id}] 使用代理运行时: {describe_proxy_runtime(proxy_runtime)}")
-                try:
-                    recorded_proxy_ip = _record_used_proxy_ip(base_dir, proxy_config, proxy_runtime, worker_id)
-                except Exception as e:
-                    print(f"[Worker-{worker_id}] 记录代理出口IP失败: {e}")
-                    recorded_proxy_ip = False
-                if is_static_proxy and not recorded_proxy_ip:
-                    print(f"[Worker-{worker_id}] 固定代理出口IP已记录，继续复用")
-                elif not recorded_proxy_ip:
-                    print(f"[Worker-{worker_id}] 代理出口IP未记录，停止当前账号并重试")
-                    stop_managed_proxy_runtime(proxy_runtime)
-                    return AutomationResult.from_status(AccountStatus.PROXY_FAILED)
             else:
                 print(f"[Worker-{worker_id}] 代理初始化失败，停止当前账号并重试")
                 stop_managed_proxy_runtime(proxy_runtime)

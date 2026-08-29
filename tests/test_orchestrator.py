@@ -7,19 +7,12 @@ from unittest.mock import Mock, patch
 
 from binance_analyzer.automation.orchestrator import (
     _build_account_proxy_config,
-    _is_static_proxy_mode,
-    _record_used_proxy_ip,
     register_account,
 )
 from binance_analyzer.results import AccountStatus, AutomationResult
 
 
 class OrchestratorProxyIpTests(unittest.TestCase):
-    def test_is_static_proxy_mode_detects_fixed_proxy_config(self) -> None:
-        self.assertTrue(_is_static_proxy_mode({"mode": "static"}))
-        self.assertTrue(_is_static_proxy_mode({"mode": " STATIC "}))
-        self.assertFalse(_is_static_proxy_mode({"mode": "dynamic"}))
-
     def test_build_account_proxy_config_uses_ephemeral_gost_port(self) -> None:
         proxy_config = {
             "enabled": True,
@@ -34,39 +27,6 @@ class OrchestratorProxyIpTests(unittest.TestCase):
 
         self.assertEqual(runtime_proxy_config["gost"]["listen_port"], 0)
         self.assertEqual(proxy_config["gost"]["listen_port"], 8888)
-
-    def test_record_used_proxy_ip_writes_configured_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base_dir = Path(tmpdir)
-            proxy_config = {"used_ips_file": "data/runtime/used_proxy_ips.txt"}
-
-            appended = _record_used_proxy_ip(
-                base_dir,
-                proxy_config,
-                {"final_upstream": {"exit_ip": "8.8.8.8"}},
-                worker_id=0,
-            )
-
-            self.assertTrue(appended)
-            self.assertEqual(
-                (base_dir / "data" / "runtime" / "used_proxy_ips.txt").read_text(encoding="utf-8"),
-                "8.8.8.8\n",
-            )
-
-    def test_record_used_proxy_ip_deduplicates_existing_ip(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base_dir = Path(tmpdir)
-            proxy_config = {"used_ips_file": "data/runtime/used_proxy_ips.txt"}
-
-            first = _record_used_proxy_ip(base_dir, proxy_config, {"exit_ip": "8.8.8.8"}, worker_id=0)
-            second = _record_used_proxy_ip(base_dir, proxy_config, {"exit_ip": "8.8.8.8"}, worker_id=0)
-
-            self.assertTrue(first)
-            self.assertFalse(second)
-            self.assertEqual(
-                (base_dir / "data" / "runtime" / "used_proxy_ips.txt").read_text(encoding="utf-8"),
-                "8.8.8.8\n",
-            )
 
     def test_register_account_rejects_unknown_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,6 +1,9 @@
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote, urlparse, urlunparse
+
+DEFAULT_PROXY_POOL_ID = "default"
 
 
 def _require_dict(config: dict, key: str) -> dict:
@@ -49,6 +52,130 @@ def _positive_int(value, *, key: str) -> int:
     if parsed <= 0:
         raise ValueError(f"配置 {key} 必须是正整数")
     return parsed
+
+
+def _load_proxy_profile(base_dir: Path, automation_config: dict) -> dict:
+    """加载独立代理策略，并保留 automation.json 中的 bootstrap 白名单出口。"""
+    proxy_path = base_dir / "config" / "proxy.json"
+    if not proxy_path.exists():
+        return automation_config
+
+    try:
+        with proxy_path.open("r", encoding="utf-8") as file:
+            proxy_document = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"代理配置文件读取失败: {proxy_path}: {exc}") from exc
+    if not isinstance(proxy_document, dict):
+        raise ValueError("config/proxy.json 必须是 JSON 对象")
+
+    profiles = proxy_document.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError("config/proxy.json 必须配置非空 profiles 对象")
+
+    automation_proxy = _require_dict(automation_config, "proxy")
+    profile_name = str(automation_proxy.get("profile") or automation_proxy.get("proxy_profile") or "").strip()
+    if not profile_name:
+        raise ValueError("config/automation.json.proxy.profile 必须配置")
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        raise ValueError(f"config/proxy.json 不存在代理 profile: {profile_name}")
+
+    merged_proxy = dict(profile)
+    merged_proxy["enabled"] = _require_bool(automation_proxy, "enabled")
+    static_ref = str(merged_proxy.get("static_ref") or "").strip()
+    if static_ref:
+        if static_ref != "automation.proxy.static" or not isinstance(automation_proxy.get("static"), dict):
+            raise ValueError("static profile 必须使用 automation.proxy.static 作为 static_ref")
+        merged_proxy["static"] = dict(automation_proxy["static"])
+        merged_proxy.pop("static_ref", None)
+    api_url_ref = str(merged_proxy.get("api_url_ref") or "").strip()
+    if api_url_ref:
+        if api_url_ref != "automation.proxy.api_url" or not automation_proxy.get("api_url"):
+            raise ValueError("动态 profile 的 api_url_ref 必须指向 automation.proxy.api_url")
+        merged_proxy["api_url"] = str(automation_proxy["api_url"]).strip()
+        merged_proxy.pop("api_url_ref", None)
+    if merged_proxy.get("mode") == "dynamic":
+        bootstrap_ref = str(merged_proxy.get("bootstrap_ref") or "").strip()
+        if bootstrap_ref:
+            if bootstrap_ref != "automation.proxy.bootstrap":
+                raise ValueError("dynamic profile 的 bootstrap_ref 必须指向 automation.proxy.bootstrap")
+            bootstrap = automation_proxy.get("bootstrap")
+        else:
+            bootstrap = merged_proxy.get("bootstrap")
+        if not isinstance(bootstrap, dict) or not bootstrap.get("host") or not bootstrap.get("port"):
+            raise ValueError("动态代理必须配置 proxy.json 中的 bootstrap 白名单出口")
+        merged_proxy["bootstrap"] = dict(bootstrap)
+        merged_proxy.pop("bootstrap_ref", None)
+    if "gost" in proxy_document:
+        if not isinstance(proxy_document["gost"], dict):
+            raise ValueError("config/proxy.json.gost 必须是对象")
+        merged_proxy["gost"] = dict(proxy_document["gost"])
+
+    result = dict(automation_config)
+    result["proxy"] = merged_proxy
+    return result
+
+
+def load_proxy_pool(base_dir: Path, proxy_config: dict, profile_name: str = "rotating_single_ip") -> dict:
+    """读取固定代理池，保留文件顺序；空行和 # 注释会被忽略。"""
+    profile = (proxy_config.get("profiles") or {}).get(profile_name)
+    if not isinstance(profile, dict) or profile.get("mode") != "rotating_single_ip":
+        raise ValueError(f"代理配置缺少 rotating_single_ip profile: {profile_name}")
+    pool_file = str(profile.get("pool_file") or "").strip()
+    if not pool_file:
+        raise ValueError("rotating_single_ip 必须配置 pool_file")
+    path = Path(pool_file)
+    if not path.is_absolute():
+        path = base_dir / path
+    if not path.exists():
+        raise FileNotFoundError(f"固定代理池文件不存在: {path}")
+    raw_text = path.read_text(encoding="utf-8")
+    values = []
+    if path.suffix.lower() == ".json":
+        try:
+            entries = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"固定代理池 JSON 无效: {path}: {exc}") from exc
+        if not isinstance(entries, list):
+            raise ValueError("固定代理池 JSON 必须是数组")
+        for index, entry in enumerate(entries, 1):
+            if not isinstance(entry, dict):
+                raise ValueError(f"固定代理池第 {index} 项必须是对象")
+            scheme = str(entry.get("scheme") or "").strip().lower()
+            host = str(entry.get("host") or "").strip()
+            port = entry.get("port")
+            username = str(entry.get("username") or "")
+            password = str(entry.get("password") or "")
+            if scheme not in {"http", "https", "socks5", "socks5h"} or not host or not str(port).isdigit() or not (1 <= int(port) <= 65535):
+                raise ValueError(f"固定代理池第 {index} 项必须包含有效 scheme/host/port")
+            values.append({"scheme": scheme, "host": host, "port": int(port), "username": username, "password": password})
+    else:
+        for line_number, raw in enumerate(raw_text.splitlines(), 1):
+            value = raw.strip()
+            if not value or value.startswith("#"):
+                continue
+            parsed = urlparse(value)
+            if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname or not parsed.port:
+                raise ValueError(f"固定代理池第 {line_number} 行格式无效，需 scheme://host:port")
+            values.append({"scheme": parsed.scheme.lower(), "host": parsed.hostname, "port": parsed.port, "username": parsed.username or "", "password": parsed.password or ""})
+    if not values:
+        raise ValueError(f"固定代理池为空: {path}")
+    # 一个 IP 连续多少个账号最终失败后切换；旧字段仅保留兼容读取。
+    threshold_value = profile.get("switch_after_account_failures", profile.get("switch_after_consecutive_account_failures", 3))
+    threshold = _positive_int(threshold_value, key="proxy.switch_after_account_failures")
+    cooldown_seconds = _positive_int(profile.get("cooldown_seconds", 86400), key="proxy.cooldown_seconds")
+    allow_parallel = profile.get("allow_parallel", False)
+    if not isinstance(allow_parallel, bool):
+        raise ValueError("proxy.allow_parallel 必须是布尔值")
+    return {
+        "pool_id": DEFAULT_PROXY_POOL_ID,
+        "addresses": [urlunparse((entry["scheme"], f"{quote(entry['username'], safe='')}:{quote(entry['password'], safe='')}@{entry['host']}:{entry['port']}" if entry["username"] else f"{entry['host']}:{entry['port']}", "", "", "", "")) for entry in values],
+        "entries": values,
+        "switch_threshold": threshold,
+        "cooldown_seconds": cooldown_seconds,
+        "allow_parallel": allow_parallel,
+        "path": str(path),
+    }
 
 
 def _normalize_captcha_config(config: dict) -> None:
@@ -118,6 +245,9 @@ def load_config(base_dir: Path, filename: str = "config/automation.json") -> dic
     if not isinstance(config, dict):
         raise ValueError(f"{filename} 必须是 JSON 对象")
 
+    if filename == "config/automation.json":
+        config = _load_proxy_profile(base_dir, config)
+
     if "mode" not in config:
         raise ValueError("缺少必填配置: mode")
     mode = str(config.get("mode") or "").strip().lower()
@@ -140,7 +270,6 @@ def load_config(base_dir: Path, filename: str = "config/automation.json") -> dic
 
     proxy_config = _require_dict(config, "proxy")
     _require_bool(proxy_config, "enabled")
-    _require_text(proxy_config, "used_ips_file")
 
     runtime_config = _require_dict(config, "runtime")
     runtime_config["max_workers_default"] = _positive_int(
