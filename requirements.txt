@@ -1,5 +1,5 @@
 playwright
-requests
+requests[socks]
 opencv-python
 numpy
 psutil

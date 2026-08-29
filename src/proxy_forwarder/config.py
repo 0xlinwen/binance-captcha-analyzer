@@ -16,12 +16,14 @@ DEFAULT_PROXY_CONFIG: dict[str, Any] = {
     "proxy_quality_check_max_latency_ms": None,
     "proxy_quality_check_url": None,
     "static": {
+        "scheme": "http",
         "host": "",
         "port": "",
         "username": "",
         "password": "",
     },
     "bootstrap": {
+        "scheme": "http",
         "host": "",
         "port": "",
         "username": "",
@@ -127,11 +129,13 @@ def resolve_proxy_settings(
     gost = proxy_config.get("gost") or {}
 
     static_host = str(static.get("host") or "").strip()
+    static_scheme = str(static.get("scheme") or "http").strip().lower()
     static_port = str(static.get("port") or "").strip()
     static_username = str(static.get("username") or "").strip()
     static_password = str(static.get("password") or "")
 
     bootstrap_host = str(bootstrap.get("host") or "").strip()
+    bootstrap_scheme = str(bootstrap.get("scheme") or "http").strip().lower()
     bootstrap_port = str(bootstrap.get("port") or "").strip()
     bootstrap_username = str(bootstrap.get("username") or "").strip()
     bootstrap_password = str(bootstrap.get("password") or "")
@@ -143,12 +147,14 @@ def resolve_proxy_settings(
         "timeout_seconds": int(proxy_config.get("timeout_seconds", 15)),
         "check_timeout_seconds": int(proxy_config.get("check_timeout_seconds", 15)),
         "static": {
+            "scheme": static_scheme,
             "host": static_host,
             "port": static_port,
             "username": static_username,
             "password": static_password,
         },
         "bootstrap": {
+            "scheme": bootstrap_scheme,
             "host": bootstrap_host,
             "port": bootstrap_port,
             "username": bootstrap_username,

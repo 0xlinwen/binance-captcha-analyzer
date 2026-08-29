@@ -237,7 +237,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, ("alice@example.com", "pass1", AccountStatus.SUCCESS))
         self.assertEqual(mock_register_account.call_count, 2)
-        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertEqual(mock_sleep.call_count, 0)
 
     @patch("binance_analyzer.cli.time.sleep")
     @patch("binance_analyzer.cli.register_account")
@@ -259,7 +259,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, ("alice@example.com", "pass1", AccountStatus.PROXY_FAILED))
         self.assertEqual(mock_register_account.call_count, 2)
-        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertEqual(mock_sleep.call_count, 0)
 
     @patch("binance_analyzer.cli.time.sleep")
     @patch("binance_analyzer.cli.register_account")

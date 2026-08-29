@@ -736,6 +736,8 @@ def handle_email_verification(
 
     code_input = None
     min_timestamp = 0
+    frequency_retry_count = 0
+    max_frequency_retries = 2
     for retry in range(10):
         if _check_url_redirect():
             logger.info("检测到页面跳转，退出邮件验证流程")
@@ -765,17 +767,63 @@ def handle_email_verification(
             return "url_changed"
         return False
 
-    email_code = get_email_verification_code(
-        imap_host,
-        imap_port,
-        email_addr,
-        email_password,
-        timeout=90,
-        initial_count=initial_count,
-        consumed_codes=consumed_codes,
-        should_abort=_check_url_redirect,
-        min_timestamp=min_timestamp,
-    )
+    while True:
+        try:
+            body_text = page.inner_text("body")
+        except Exception:
+            body_text = ""
+        if "015002" in body_text and frequency_retry_count < max_frequency_retries:
+            frequency_retry_count += 1
+            print(f"[{email_addr}] 请求频繁 (015002)，等待 60 秒后重试 ({frequency_retry_count}/{max_frequency_retries})...")
+            logger.warning(f"[{email_addr}] 请求频繁 (015002)，等待 60 秒后重试 ({frequency_retry_count}/{max_frequency_retries})")
+            page.wait_for_timeout(60000)
+            if _check_url_redirect():
+                return "url_changed"
+            min_timestamp = get_latest_binance_mail_timestamp(imap_host, imap_port, email_addr, email_password)
+            if min_timestamp == "imap_auth_failed":
+                return "imap_auth_failed"
+            _click_get_code_button()
+            continue
+
+        email_code = get_email_verification_code(
+            imap_host,
+            imap_port,
+            email_addr,
+            email_password,
+            timeout=90,
+            initial_count=initial_count,
+            consumed_codes=consumed_codes,
+            should_abort=_check_url_redirect,
+            min_timestamp=min_timestamp,
+        )
+        if email_code or email_code in {"aborted", "imap_auth_failed"}:
+            break
+
+        try:
+            body_text = page.inner_text("body")
+        except Exception:
+            body_text = ""
+        if "015002" not in body_text or frequency_retry_count >= max_frequency_retries:
+            break
+
+        frequency_retry_count += 1
+        logger.warning(
+            f"[{email_addr}] 检测到邮箱验证码请求频繁 (015002)，"
+            f"等待 60 秒后重试获取验证码 ({frequency_retry_count}/{max_frequency_retries})"
+        )
+        print(
+            f"[{email_addr}] 请求频繁 (015002)，等待 60 秒后重试 "
+            f"({frequency_retry_count}/{max_frequency_retries})..."
+        )
+        page.wait_for_timeout(60000)
+        if _check_url_redirect():
+            return "url_changed"
+        min_timestamp = get_latest_binance_mail_timestamp(
+            imap_host, imap_port, email_addr, email_password
+        )
+        if min_timestamp == "imap_auth_failed":
+            return "imap_auth_failed"
+        _click_get_code_button()
     if email_code == "aborted":
         logger.info("等待邮件期间页面 URL 变化，退出邮件验证流程")
         return "url_changed"

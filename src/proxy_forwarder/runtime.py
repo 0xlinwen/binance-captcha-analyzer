@@ -8,6 +8,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import requests
 from typing import Any, Callable, Mapping
 
 from .logging import ProxyLogger, emit_log
@@ -256,11 +257,13 @@ def fetch_proxy_via_bootstrap(
     logger: ProxyLogger | None = None,
 ) -> dict[str, Any] | None:
     proxy_url = build_proxy_url(bootstrap_proxy)
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    opener = urllib.request.build_opener(proxy_handler)
     try:
-        with opener.open(proxy_api, timeout=timeout) as response:
-            text = response.read().decode("utf-8").strip()
+        with requests.Session() as session:
+            session.trust_env = False
+            session.proxies = {"http": proxy_url, "https": proxy_url}
+            response = session.get(proxy_api, timeout=timeout)
+            response.raise_for_status()
+            text = response.text.strip()
     except Exception as exc:
         emit_log(logger, "bootstrap-proxy", "fetch-failed", error=exc)
         return None
@@ -274,20 +277,13 @@ def fetch_public_ip_via_proxy(
     logger: ProxyLogger | None = None,
 ) -> str | None:
     proxy_url = build_proxy_url(proxy_info)
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    https_handler = urllib.request.HTTPSHandler(context=ssl._create_unverified_context())
-    opener = urllib.request.build_opener(proxy_handler, https_handler)
-    request = urllib.request.Request(
-        "https://api.ip.sb/ip",
-        headers={
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "User-Agent": "Mozilla/5.0",
-        },
-    )
     try:
-        with opener.open(request, timeout=timeout) as response:
-            ip = response.read().decode("utf-8", errors="ignore").strip()
+        with requests.Session() as session:
+            session.trust_env = False
+            session.proxies = {"http": proxy_url, "https": proxy_url}
+            response = session.get("https://api.ip.sb/ip", headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+            response.raise_for_status()
+            ip = response.text.strip()
     except Exception as exc:
         emit_log(logger, "proxy-ip", "fetch-failed", proxy=describe_proxy(proxy_info), error=exc)
         return None
@@ -769,6 +765,7 @@ def get_proxy_runtime(
     bootstrap_config = proxy_settings.get("bootstrap") or {}
 
     static_upstream = {
+        "scheme": static_config.get("scheme") or "http",
         "ip": static_config.get("host"),
         "port": static_config.get("port"),
         "user": static_config.get("username"),
@@ -778,6 +775,7 @@ def get_proxy_runtime(
         static_upstream = None
 
     bootstrap_upstream = {
+        "scheme": bootstrap_config.get("scheme") or "http",
         "ip": bootstrap_config.get("host"),
         "port": bootstrap_config.get("port"),
         "user": bootstrap_config.get("username"),
@@ -846,5 +844,3 @@ def get_proxy_runtime(
         }
 
     return None
-
-

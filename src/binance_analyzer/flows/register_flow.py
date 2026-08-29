@@ -39,6 +39,19 @@ def _has_visible_register_ack_button(page) -> bool:
     return False
 
 
+def _register_email_matches(page, email_addr: str) -> bool:
+    """仅当注册邮箱框已填入当前账号时，才处理提交后的确认弹窗。"""
+    try:
+        email_input = page.query_selector(
+            "input[data-e2e='input-username'], input[name='username'], input[name='email'], input[type='email']"
+        )
+        if not email_input or not email_input.is_visible():
+            return False
+        return str(email_input.get_attribute("value") or "").strip().lower() == str(email_addr).strip().lower()
+    except Exception:
+        return False
+
+
 def _has_visible_captcha_popup(page) -> bool:
     """检查注册页是否已有验证码弹窗遮挡输入区域。"""
     try:
@@ -256,10 +269,14 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                 cleanup_listeners()
                 return AccountStatus.RATE_LIMITED
 
-            if risk.is_auth_failure:
-                if _retry_auth_failure_continue(page, email_addr, logger):
-                    continue
-                console_log(email_addr, "认证失败重试3次仍未通过，停止当前账号", "error")
+                if risk.is_auth_failure:
+                    if _retry_auth_failure_continue(page, email_addr, logger):
+                        continue
+                    if "208075" in body_text and config.get("proxy", {}).get("mode", "").strip().lower() == "dynamic":
+                        console_log(email_addr, "认证失败重试未通过，切换动态代理重试", "warning")
+                        logger.warning("208075 连续认证恢复失败，交由外层重新拉取动态 IP")
+                        return AccountStatus.PROXY_FAILED
+                    console_log(email_addr, "认证失败重试3次仍未通过，停止当前账号", "error")
                 logger.error("平台认证失败，连续点击继续3次仍未进入下一步")
                 duration = (datetime.now() - start_time).total_seconds()
                 log_summary(
@@ -569,7 +586,7 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             except Exception:
                 pass
 
-            if _has_visible_register_ack_button(page):
+            if _register_email_matches(page, email_addr) and _has_visible_register_ack_button(page):
                 if _retry_register_submit_ack_error(page, email_addr, logger, submit_error_ack_max_attempts):
                     continue
                 console_log(email_addr, "注册提交确认弹窗处理失败", "error")

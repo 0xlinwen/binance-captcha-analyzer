@@ -46,6 +46,17 @@ class ProxyForwarderConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "proxy.enabled"):
             resolve_proxy_settings({"enabled": "definitely", "mode": "dynamic"})
 
+    def test_resolve_proxy_settings_preserves_static_proxy_scheme(self) -> None:
+        settings = resolve_proxy_settings(
+            {
+                "enabled": True,
+                "mode": "static",
+                "static": {"scheme": "socks5", "host": "127.0.0.1", "port": 1080},
+            }
+        )
+
+        self.assertEqual(settings["static"]["scheme"], "socks5")
+
 
 if __name__ == "__main__":
     unittest.main()

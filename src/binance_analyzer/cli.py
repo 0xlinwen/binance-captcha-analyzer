@@ -61,13 +61,6 @@ def process_account(args):
                 if attempt < max_retries - 1:
                     retry_action = "重试固定代理" if _is_static_proxy_mode(config) else "换代理重试"
                     print(f"[{short_email}] 代理失败，{retry_action} {attempt + 2}/{max_retries}")
-                    _sleep_random_delay(
-                        config,
-                        min_key="proxy_retry_delay_min_sec",
-                        max_key="proxy_retry_delay_max_sec",
-                        label="代理重试冷却",
-                        short_email=short_email,
-                    )
                 continue
             if attempt < max_retries - 1:
                 print(f"[{short_email}] ⟳ 重试 {attempt + 2}/{max_retries}")
