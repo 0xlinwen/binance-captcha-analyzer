@@ -99,7 +99,9 @@ def build_proxy_quality_check(
         resolve_value("proxy_quality_check_enabled", None),
         key="proxy.proxy_quality_check_enabled",
     )
-    enabled = default_enabled if configured_enabled is None else configured_enabled
+    # 固定代理地址无需因延迟阈值被误判淘汰；动态代理仍按配置/默认值执行质量检测。
+    mode = str(proxy_config.get("mode") or "").strip().lower()
+    enabled = (False if mode == "static" else default_enabled) if configured_enabled is None else configured_enabled
 
     try:
         timeout_seconds = float(resolve_value("proxy_quality_check_timeout_seconds", 10))
