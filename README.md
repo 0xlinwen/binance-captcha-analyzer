@@ -240,6 +240,7 @@ Windows Worker 需安装项目完整依赖（`requirements.txt`）并执行
 
 Windows `config/worker.json` 可设置 `worker_max_workers` 控制同一任务内的账号并发数，
 例如 `2` 表示该 Windows Worker 全部任务最多同时执行两个账号，其余账号排队；默认值为 `1`（串行）。
+运行中的 Worker 可通过 `PATCH /worker/config/concurrency` 热更新该值，请求体必须包含目标 `worker_id`，例如 `{"worker_id":"windows-01","worker_max_workers":2}`；Worker 会校验它与本机 `worker.json` 一致。也可从 Cloud 调用 `PATCH /api/workers/{worker_id}/concurrency`，请求体同样必须带相同的 `worker_id`，由 Cloud 转发并同步 SQLite 容量。接口成功后新任务使用新并发数，正在执行的账号继续完成，不需要重启 Worker。配置文件会原子更新，Worker 重启后沿用新值。
 固定代理池任务采用逐账号派发：Linux 每次只领取一个 job item，创建一个代理 lease，并以单账号 payload
 独立 `POST /worker/execute-login`。例如 10 个账号、2 个线程时，首轮派发账号 1 和 2；任一账号完成并回调后释放对应槽位，
 Linux 在维护循环（当前约 60 秒一次）中领取账号 3、4……继续补位，不是把 10 个账号预先切成两个固定批次，也不是一次 POST 全部账号。
