@@ -38,6 +38,13 @@ class ProxyForwarderConfigTests(unittest.TestCase):
 
         self.assertFalse(quality_check["enabled"])
 
+    def test_static_proxy_quality_check_defaults_to_disabled(self) -> None:
+        quality_check = build_proxy_quality_check(
+            {"url": "https://accounts.binance.com/zh-CN/login"},
+            {"enabled": True, "mode": "static"},
+        )
+        self.assertFalse(quality_check["enabled"])
+
     def test_resolve_proxy_settings_rejects_string_bool(self) -> None:
         with self.assertRaisesRegex(ValueError, "proxy.enabled"):
             resolve_proxy_settings({"enabled": "false", "mode": "dynamic"})

@@ -5,6 +5,7 @@
     },
     "static": {
       "mode": "static",
+      "proxy_quality_check_enabled": false,
       "static": {
         "scheme": "socks5",
         "host": "proxy.example.com",
