@@ -139,6 +139,10 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 if risk.is_auth_failure:
                     if _retry_auth_failure_continue(page, email_addr, logger):
                         continue
+                    if "208075" in body_text and config.get("proxy", {}).get("mode", "").strip().lower() == "dynamic":
+                        console_log(email_addr, "认证失败重试未通过，切换动态代理重试", "warning")
+                        logger.warning("208075 连续认证恢复失败，交由外层重新拉取动态 IP")
+                        return AccountStatus.PROXY_FAILED
                     console_log(email_addr, "认证失败重试3次仍未通过，停止当前账号", "error")
                     logger.error("平台认证失败，连续点击继续3次仍未进入下一步")
                     duration = (datetime.now() - start_time).total_seconds()
@@ -379,6 +383,19 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 # URL已经变化，跳到下一次迭代处理新的URL状态
                 logger.info(f"验证码处理后URL已变化，进入新状态: {url}")
                 continue
+
+            # 验证码已消失但页面仍停留在登录页：重新点击登录继续，触发邮箱表单提交。
+            if captcha_result is CaptchaSolveStatus.PASSED:
+                logger.info("验证码通过但 URL 未变化，重新点击登录继续")
+                if not click_login_continue_strict(page):
+                    logger.error("验证码通过后未找到登录继续按钮")
+                    return AccountStatus.FAILED
+                response_type, url = _wait_for_page_response(
+                    page, url_before, timeout_ms=5000, logger=logger
+                )
+                logger.info(f"验证码通过后重新点击登录继续响应类型: {response_type}")
+                if response_type in ("url_changed", "captcha"):
+                    continue
 
             email_input = page.query_selector("input[data-e2e='input-username'], input[name='username'], input[name='email']")
             if email_input:

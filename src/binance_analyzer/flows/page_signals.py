@@ -189,8 +189,8 @@ def has_auth_failure_error(text: str) -> bool:
 def assess_risk_text(text: str) -> RiskAssessment:
     """分析页面文本中的风险信号。"""
     value = str(text or "")
-    is_auth_failure = has_auth_failure_error(value)
     is_proxy_failure = has_proxy_failure_error(value)
+    is_auth_failure = has_auth_failure_error(value)
     return RiskAssessment(
         has_risk=_contains_any(value, RISK_SIGNATURES) or is_auth_failure or is_proxy_failure,
         text=value,

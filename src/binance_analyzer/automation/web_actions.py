@@ -105,12 +105,25 @@ def input_email(page, email_addr):
             pass
 
     if email_input:
-        email_input.click()
-        time.sleep(random.uniform(0.2, 0.4))
-        _human_clear_input(email_input, page)
-        _paste_text(page, email_addr)
-        logger.info(f"输入邮箱: {email_addr}")
-        return True
+        expected_value = str(email_addr).strip().lower()
+        for attempt in range(1, 3):
+            email_input.click()
+            time.sleep(random.uniform(0.2, 0.4))
+            _human_clear_input(email_input, page)
+            _paste_text(page, email_addr)
+            try:
+                actual_value = str(email_input.get_attribute("value") or "").strip()
+            except Exception:
+                actual_value = ""
+            if actual_value.lower() == expected_value:
+                logger.info(f"输入邮箱: {email_addr}")
+                return True
+            logger.warning(
+                f"邮箱输入校验失败 ({attempt}/2): expected={email_addr!r}, actual={actual_value!r}"
+            )
+            page.wait_for_timeout(300)
+        logger.error(f"邮箱输入校验连续失败: expected={email_addr!r}")
+        return False
 
     logger.error("未找到邮箱输入框!")
     return False

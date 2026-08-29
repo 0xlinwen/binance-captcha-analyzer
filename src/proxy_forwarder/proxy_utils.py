@@ -74,7 +74,10 @@ def build_proxy_url(proxy_info: Mapping[str, Any]) -> str:
 
     host = proxy_info.get("ip") or proxy_info.get("host") or ""
     port = proxy_info.get("port") or ""
-    return f"http://{credentials}{host}:{port}"
+    scheme = str(proxy_info.get("scheme") or "http").strip().lower()
+    if scheme not in {"http", "socks5", "socks5h"}:
+        raise ValueError(f"不支持的代理协议: {scheme}")
+    return f"{scheme}://{credentials}{host}:{port}"
 
 
 def describe_proxy(proxy_info: Mapping[str, Any] | None) -> str:
