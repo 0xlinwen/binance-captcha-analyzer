@@ -243,11 +243,20 @@ class Database:
             )
             if current_id not in valid_ids:
                 current_id = None
+            # 重载代理文件时，不能因没有 active 条目就把冷却 IP 提前复活。
+            # 仅从新增或原本可用的条目中选一个作为 active；全部仍在冷却时保持无 active。
+            if current_id is None:
+                for position, address in enumerate(values):
+                    entry_id = f"{pool_id}:{position}"
+                    old = self._one("SELECT status,address FROM proxy_pool_entries WHERE id=?", (entry_id,))
+                    if old is None or old["address"] != address or old["status"] == "available":
+                        current_id = entry_id
+                        break
             for position, address in enumerate(values):
                 entry_id = f"{pool_id}:{position}"
                 old = self._one("SELECT status,address FROM proxy_pool_entries WHERE id=?", (entry_id,))
                 changed = old and old["address"] != address
-                status = "active" if (current_id == entry_id or (current_id is None and position == 0)) else ("available" if changed else (old["status"] if old and old["status"] in {"exhausted", "disabled", "cooling"} else "available"))
+                status = "active" if current_id == entry_id else ("available" if changed else (old["status"] if old and old["status"] in {"exhausted", "disabled", "cooling"} else "available"))
                 self.conn.execute(
                     """INSERT INTO proxy_pool_entries(id,pool_id,position,address,status,last_switched_at)
                        VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET address=excluded.address,position=excluded.position,status=excluded.status,
@@ -814,14 +823,67 @@ class Database:
             self.conn.execute("UPDATE worker_nodes SET capacity=?,updated_at=? WHERE id=?", (int(capacity), utc_now(), worker_id))
             return self._one("SELECT * FROM worker_nodes WHERE id=?", (worker_id,))
 
-    def reserve_worker_slot(self, worker_id: str) -> bool:
-        with self._lock, self.conn:
-            updated = self.conn.execute("UPDATE worker_nodes SET active_slots=active_slots+1,updated_at=? WHERE id=? AND status='online' AND active_slots < capacity", (utc_now(), worker_id)).rowcount
-            return bool(updated)
+    def reserve_worker_slot(self, worker_id: str, job_item_id: int | None = None) -> bool:
+        """原子预约 Worker 槽位，并可同步登记具体任务项。
 
-    def release_worker_slot(self, worker_id: str) -> None:
+        槽位和 ``worker_active_items`` 必须在同一个事务内维护。否则多个
+        Cloud 派发线程会分别看到空闲容量，造成浏览器数超过 Worker 上限。
+        """
         with self._lock, self.conn:
-            self.conn.execute("UPDATE worker_nodes SET active_slots=MAX(active_slots-1,0),updated_at=? WHERE id=?", (utc_now(), worker_id))
+            worker = self._one("SELECT capacity,status,active_slots FROM worker_nodes WHERE id=?", (worker_id,))
+            if not worker or worker["status"] != "online":
+                return False
+            item_used = self.conn.execute(
+                "SELECT COUNT(*) FROM worker_active_items WHERE worker_id=?", (worker_id,)
+            ).fetchone()[0]
+            # 兼容尚未绑定具体 job_item 的旧调用，同时以明细登记纠正旧的
+            # 槽位计数漂移。
+            used = max(int(worker.get("active_slots") or 0), item_used)
+            if used >= int(worker["capacity"]):
+                self.conn.execute(
+                    "UPDATE worker_nodes SET active_slots=?,updated_at=? WHERE id=?",
+                    (used, utc_now(), worker_id),
+                )
+                return False
+            if job_item_id is not None:
+                self.conn.execute(
+                    "INSERT INTO worker_active_items(worker_id,job_item_id,last_heartbeat_at) VALUES(?,?,?) "
+                    "ON CONFLICT(worker_id,job_item_id) DO UPDATE SET last_heartbeat_at=excluded.last_heartbeat_at",
+                    (worker_id, job_item_id, utc_now()),
+                )
+            self.conn.execute(
+                "UPDATE worker_nodes SET active_slots=?,updated_at=? WHERE id=?",
+                (used + 1, utc_now(), worker_id),
+            )
+            return True
+
+    def release_worker_slot(self, worker_id: str, job_item_id: int | None = None) -> None:
+        with self._lock, self.conn:
+            if job_item_id is not None:
+                self.conn.execute(
+                    "DELETE FROM worker_active_items WHERE worker_id=? AND job_item_id=?",
+                    (worker_id, job_item_id),
+                )
+            used = self.conn.execute(
+                "SELECT COUNT(*) FROM worker_active_items WHERE worker_id=?", (worker_id,)
+            ).fetchone()[0]
+            self.conn.execute("UPDATE worker_nodes SET active_slots=?,updated_at=? WHERE id=?", (used, utc_now(), worker_id))
+
+    def defer_dispatch_for_capacity(self, job_item_id: int, lease_id: str | None = None) -> None:
+        """无可用 Worker 槽位时归还已预领资源，保留账号为待派发状态。"""
+        with self._lock, self.conn:
+            item = self._one("SELECT * FROM login_job_items WHERE id=?", (job_item_id,))
+            if not item:
+                raise ValueError("找不到任务明细")
+            target_lease = lease_id or item.get("lease_id")
+            if target_lease:
+                self.release_proxy_lease(target_lease, result_status="retryable", release_reason="worker_capacity_full")
+            self.conn.execute(
+                "UPDATE login_job_items SET status='queued',worker_id=NULL,lease_id=NULL,proxy_entry_id=NULL,proxy_address=NULL,lease_expires_at=NULL WHERE id=? AND status='running'",
+                (job_item_id,),
+            )
+            self.record_log("dispatch_deferred_capacity", "Worker 槽位已满，任务回到队列", job_id=item["job_id"], job_item_id=job_item_id, level="INFO")
+            self._refresh_job_state(item["job_id"], utc_now())
 
     def bind_lease_worker(self, lease_id: str, worker_id: str) -> None:
         with self._lock, self.conn:
@@ -896,7 +958,7 @@ class Database:
                 failed_item = self._one("SELECT worker_id FROM login_job_items WHERE id=?", (job_item_id,))
                 self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count + 1 < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_dispatch_failed',error_message=? WHERE id=? AND status='running'", (message, job_item_id))
                 if not lease_id and failed_item and failed_item.get("worker_id"):
-                    self.release_worker_slot(failed_item["worker_id"])
+                    self.release_worker_slot(failed_item["worker_id"], job_item_id)
             else:
                 self.conn.execute("UPDATE login_job_items SET status=CASE WHEN retry_count + 1 < max_retries THEN 'retryable' ELSE 'failed' END,retry_count=retry_count+1,error_code='worker_dispatch_failed',error_message=? WHERE job_id=? AND status='running'", (message, job_id))
             self.record_log("worker_dispatch_failed", message, job_id=job_id, level="ERROR")
@@ -1002,7 +1064,7 @@ class Database:
                 lease_result = "success" if business_terminal else (status if (status == "rate_limited" or (retryable and stored_status == "failed")) else (stored_status if retryable else status))
                 self.release_proxy_lease(payload["lease_id"], result_status=lease_result, release_reason="worker_callback")
             elif not had_lease and payload.get("worker_id"):
-                self.release_worker_slot(payload["worker_id"])
+                self.release_worker_slot(payload["worker_id"], item_id)
             if status == "success" and payload.get("cookie"):
                 credential_exported_at = payload.get("credential_exported_at") or now
                 self.conn.execute("""INSERT INTO credentials(account_id,cookie,csrftoken,credential_exported_at,created_at,updated_at)
