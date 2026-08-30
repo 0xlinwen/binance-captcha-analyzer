@@ -527,6 +527,23 @@ def callback(payload: CallbackPayload, x_worker_token: str | None = Header(defau
     _auth(x_worker_token, CALLBACK_TOKEN or WORKER_TOKEN, "Worker")
     try:
         result = db.save_callback(payload.model_dump())
+        if payload.status == "need_register":
+            child_job = db.route_need_register_to_child_job(payload.job_item_id)
+            if child_job:
+                db.mark_job_running(child_job["id"])
+                if child_job["proxy_mode"] == "rotating_single_ip":
+                    child_payload = db.rotating_worker_payload(child_job["id"], "dispatching", LEASE_SECONDS, pool_id=DEFAULT_PROXY_POOL_ID)
+                    if child_payload is None:
+                        db.mark_pool_exhausted(child_job["id"])
+                        _notify_once(f"proxy-pool-exhausted:{child_job['id']}", f"Binance 固定代理池耗尽，自动注册任务已停止：{child_job['id']}")
+                    else:
+                        child_payload["callback_url"] = CALLBACK_URL
+                        threading.Thread(target=_dispatch_worker, args=(child_payload,), daemon=True).start()
+                else:
+                    child_payload = db.next_worker_payload(child_job["id"], "dispatching", LEASE_SECONDS)
+                    if child_payload:
+                        child_payload["callback_url"] = CALLBACK_URL
+                        threading.Thread(target=_dispatch_worker, args=(child_payload,), daemon=True).start()
         if payload.status == "failed" and (payload.error_code or "").startswith(("proxy_bootstrap", "proxy_api", "worker_config")):
             _notify_once(f"proxy-init-failed:{payload.job_id}:{payload.job_item_id}", f"Binance 代理初始化失败：任务 {payload.job_id}，账号明细 {payload.job_item_id}，错误 {payload.error_code}")
         job = db._one("SELECT task_group_id FROM login_jobs WHERE id=?", (payload.job_id,))

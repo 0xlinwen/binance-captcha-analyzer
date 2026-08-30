@@ -159,6 +159,52 @@ class CloudDatabaseTests(unittest.TestCase):
             self.assertEqual(db.get_job(job["id"])["status"], "completed")
             self.assertEqual(db._one("SELECT state FROM proxy_leases WHERE lease_id=?", (account["lease_id"],))["state"], "released")
 
+    def test_already_registered_marks_account_and_future_register_is_skipped(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "registered@example.com", "password": "pw"}], task_mode="register")
+            item = db.get_job(job["id"])["items"][0]
+            db.mark_items_running(job["id"], "worker", 60)
+            db.save_callback({
+                "job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                "worker_id": "worker", "status": "already_registered", "error_code": "already_registered",
+            })
+            account = db._one("SELECT registration_state FROM accounts WHERE id=?", (item["account_id"],))
+            self.assertEqual(account["registration_state"], "registered")
+            next_job = db.create_job([{"email": "registered@example.com", "password": "pw"}], task_mode="register")
+            skipped = db.get_job(next_job["id"])["items"][0]
+            self.assertEqual(skipped["status"], "already_registered")
+            self.assertEqual(skipped["error_code"], "already_registered")
+
+    def test_login_need_register_routes_to_register_child_without_proxy_failure(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            group = db.create_task_group()
+            job = db.create_job(
+                [{"email": "unregistered@example.com", "password": "pw"}],
+                {"mode": "rotating_single_ip", "proxy_profile": "rotating_single_ip"},
+                task_mode="login", task_group_id=group["id"],
+            )
+            db.configure_proxy_pool("default", ["socks5://one:1000"])
+            payload = db.rotating_worker_payload(job["id"], "worker", 60)
+            account = payload["accounts"][0]
+            db.save_callback({
+                "job_id": job["id"], "job_item_id": account["job_item_id"], "account_id": account["account_id"],
+                "worker_id": "worker", "status": "need_register", "error_code": "need_register",
+                "lease_id": account["lease_id"], "proxy_entry_id": account["proxy_entry_id"],
+            })
+            source = db.get_job(job["id"])["items"][0]
+            self.assertEqual(source["status"], "need_register")
+            self.assertEqual(db._one("SELECT registration_state FROM accounts WHERE id=?", (source["account_id"],))["registration_state"], "unregistered")
+            self.assertEqual(db._one("SELECT consecutive_failures FROM proxy_pool_entries WHERE id='default:0'")["consecutive_failures"], 0)
+            child = db.route_need_register_to_child_job(source["id"])
+            self.assertIsNotNone(child)
+            child_item = db.get_job(child["id"])["items"][0]
+            self.assertEqual(child["task_mode"], "register")
+            self.assertEqual(child_item["status"], "queued")
+            self.assertEqual(child_item["retry_of_job_item_id"], source["id"])
+            self.assertIsNone(db.route_need_register_to_child_job(source["id"]))
+
     def test_failed_items_can_be_retried_from_original_credential_snapshot(self):
         with TemporaryDirectory() as temp:
             db = Database(Path(temp) / "state.db")
