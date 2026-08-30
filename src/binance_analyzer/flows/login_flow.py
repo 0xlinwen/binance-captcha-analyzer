@@ -50,6 +50,11 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
         try:
             page.wait_for_timeout(1000)  # 固定等待1秒
             url = page.url
+            body_now = _get_body_text(page)
+            if _has_frequency_limit_error(body_now):
+                console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                logger.error("平台频率限制 (208061)，立即停止当前账号")
+                return AccountStatus.RATE_LIMITED
             url_pattern = detect_login_url_state(url).value
 
             # 检查 URL 状态是否变化
@@ -326,6 +331,10 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 # 等待页面响应（URL变化或验证码弹窗）
                 response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
                 logger.info(f"密码页点击继续后响应类型: {response_type}")
+                if _has_frequency_limit_error(_get_body_text(page)):
+                    console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                    logger.error("平台频率限制 (208061)，密码提交后立即停止")
+                    return AccountStatus.RATE_LIMITED
 
             except Exception as e:
                 logger.info(f"输入密码或点击继续失败: {e}")
@@ -420,7 +429,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                     response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
                     logger.info(f"邮箱已输入点击继续后响应类型: {response_type}")
 
-                    if _has_auth_failure_error(_get_body_text(page)):
+                    response_body = _get_body_text(page)
+                    if _has_frequency_limit_error(response_body):
+                        console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                        logger.error("平台频率限制 (208061)，提交响应后立即停止")
+                        return AccountStatus.RATE_LIMITED
+                    if _has_auth_failure_error(response_body):
                         if _continue_login_after_auth_failure(page, email_addr, logger):
                             continue
                         console_log(email_addr, "认证失败重试3次仍未通过，停止当前账号", "error")
@@ -454,7 +468,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
             response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
             logger.info(f"登录页输入邮箱后响应类型: {response_type}")
 
-            if _has_auth_failure_error(_get_body_text(page)):
+            response_body = _get_body_text(page)
+            if _has_frequency_limit_error(response_body):
+                console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                logger.error("平台频率限制 (208061)，提交响应后立即停止")
+                return AccountStatus.RATE_LIMITED
+            if _has_auth_failure_error(response_body):
                 if _continue_login_after_auth_failure(page, email_addr, logger):
                     continue
                 console_log(email_addr, "认证失败重试3次仍未通过，停止当前账号", "error")

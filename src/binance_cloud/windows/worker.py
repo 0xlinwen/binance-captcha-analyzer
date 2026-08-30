@@ -171,6 +171,25 @@ def _callback_retry_loop() -> None:
         time.sleep(5)
 
 
+def _worker_heartbeat_loop() -> None:
+    """Worker 空闲时也持续报到，避免 Cloud 将正常节点误标为 offline。"""
+    while True:
+        try:
+            config = _worker_config()
+            callback_url = str(config.get("callback_url") or "").strip()
+            if callback_url:
+                base = callback_url.rsplit("/api/", 1)[0]
+                headers = {"X-Worker-Token": WORKER_TOKEN} if WORKER_TOKEN else {}
+                requests.post(
+                    f"{base}/api/workers/{config['worker_id']}/heartbeat",
+                    json={}, headers=headers, timeout=20,
+                ).raise_for_status()
+        except Exception as exc:
+            # 心跳失败不应终止 Worker；下次周期继续尝试，并保留可见日志。
+            print(f"[worker-heartbeat] 心跳失败: {exc}")
+        time.sleep(30)
+
+
 def execute(payload: dict) -> None:
     job_id = payload["job_id"]
     worker_config = _worker_config()
@@ -284,6 +303,7 @@ def _protocol_version() -> str:
 @app.on_event("startup")
 def start_callback_retry_loop() -> None:
     threading.Thread(target=_callback_retry_loop, daemon=True, name="callback-outbox").start()
+    threading.Thread(target=_worker_heartbeat_loop, daemon=True, name="worker-heartbeat").start()
 
 
 @app.post("/worker/register")

@@ -73,9 +73,19 @@ def _notify_lark(message: str) -> None:
         return
     webhook = _load_lark_webhook()
     if not webhook:
-        return
+        raise RuntimeError("已启用 Lark 通知但未配置 lark.webhook_url")
     response = requests.post(webhook, json={"msg_type": "text", "content": {"text": message}}, timeout=20)
     response.raise_for_status()
+    # 飞书自定义机器人可能以 HTTP 200 返回业务错误，不能仅凭 HTTP 状态判定送达。
+    try:
+        result = response.json()
+    except (ValueError, AttributeError):
+        result = None
+    if isinstance(result, dict):
+        code = result.get("code", result.get("StatusCode"))
+        if code is not None and str(code) not in {"0", "200"}:
+            detail = result.get("msg") or result.get("StatusMessage") or result
+            raise RuntimeError(f"Lark Webhook 业务失败: {detail}")
 
 
 def _notify_once(event_key: str, message: str) -> None:
@@ -177,6 +187,12 @@ class JobIn(BaseModel):
     accounts: list[AccountIn] = Field(min_length=1)
     proxy: ProxyIn = ProxyIn()
     task_group_id: str | None = None
+    idempotency_key: str | None = None
+
+
+class FailedItemsRetryIn(BaseModel):
+    job_item_ids: list[int] | None = Field(default=None, min_length=1)
+    proxy: ProxyIn | None = None
     idempotency_key: str | None = None
 
 
@@ -311,6 +327,51 @@ def create_job(request: JobIn):
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.get("/api/login-jobs/{job_id}/failed-items")
+def failed_items(job_id: str):
+    try:
+        return {"job_id": job_id, "items": db.failed_items(job_id)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/login-jobs/{job_id}/retry-failed")
+def retry_failed_items(job_id: str, request: FailedItemsRetryIn):
+    """基于源任务的失败账号快照创建独立重派任务，绝不在响应中返回凭据。"""
+    try:
+        if not WINDOWS_WORKER_URL or not CALLBACK_URL:
+            raise ValueError("config/cloud.json 必须配置 windows_worker_url 和 callback_url")
+        override_proxy = request.proxy.model_dump() if request.proxy is not None else None
+        job = db.create_failed_items_retry_job(
+            job_id,
+            request.job_item_ids,
+            override_proxy,
+            request.idempotency_key,
+        )
+        db.mark_job_running(job["id"])
+        if job["proxy_mode"] == "rotating_single_ip":
+            payload = db.rotating_worker_payload(job["id"], "dispatching", LEASE_SECONDS, pool_id=DEFAULT_PROXY_POOL_ID)
+            if payload is None:
+                db.mark_pool_exhausted(job["id"])
+                _notify_once(f"proxy-pool-exhausted:{job['id']}", f"Binance 固定代理池耗尽，重派任务已停止：{job['id']}")
+                raise ValueError("固定代理池没有可用 IP，重派任务已终止")
+        else:
+            payload = db.next_worker_payload(job["id"], "dispatching", LEASE_SECONDS)
+            if payload is None:
+                raise ValueError("重派任务没有可派发账号")
+        payload["callback_url"] = CALLBACK_URL
+        threading.Thread(target=_dispatch_worker, args=(payload,), daemon=True).start()
+        return {
+            "source_job_id": job_id,
+            "job_id": job["id"],
+            "status": "submitted",
+            "total_count": job["total_count"],
+            "worker_url": WINDOWS_WORKER_URL,
+        }
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _dispatch_worker(payload: dict) -> None:
     targeted_dispatch_failure = False
     try:
@@ -343,6 +404,7 @@ def _dispatch_worker(payload: dict) -> None:
                 extra["protocol_version"] = _protocol_version()
                 payloads.append(extra)
         for item_payload in payloads:
+            response = None
             try:
                 account = (item_payload.get("accounts") or [{}])[0]
                 if worker_id:
@@ -353,8 +415,11 @@ def _dispatch_worker(payload: dict) -> None:
                         raise RuntimeError("Worker 没有可用执行槽位")
                 response = requests.post(f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/execute-login", json=item_payload, headers=headers, timeout=30)
                 response.raise_for_status()
-            except Exception:
-                db.dispatch_failed(payload.get("job_id"), "Worker dispatch failed", job_item_id=account.get("job_item_id"), lease_id=account.get("lease_id"))
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                if response is not None and getattr(response, "text", ""):
+                    detail = f"{detail}; response={str(response.text)[:300]}"
+                db.dispatch_failed(payload.get("job_id"), f"Worker dispatch failed: {detail}", job_item_id=account.get("job_item_id"), lease_id=account.get("lease_id"))
                 for pending in payloads[payloads.index(item_payload) + 1:]:
                     pending_account = (pending.get("accounts") or [{}])[0]
                     if pending_account.get("lease_id"):
@@ -363,7 +428,7 @@ def _dispatch_worker(payload: dict) -> None:
                 raise
     except Exception as exc:
         if not targeted_dispatch_failure:
-            db.dispatch_failed(payload.get("job_id"), str(exc))
+            db.dispatch_failed(payload.get("job_id"), f"Worker dispatch failed: {type(exc).__name__}: {exc}")
 
 
 def _maintenance_loop() -> None:

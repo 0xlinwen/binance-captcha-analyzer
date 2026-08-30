@@ -61,6 +61,17 @@ FREQUENCY_LIMIT_SIGNATURES = (
     "208061",
 )
 
+ALREADY_REGISTERED_SIGNATURES = (
+    "已经存在账户",
+    "已存在账户",
+    "账户已经存在",
+    "账号已注册",
+    "该邮箱已注册",
+    "account already exists",
+    "email already registered",
+    "already registered",
+)
+
 RETRIABLE_SIGNATURES = (
     "300010",
 )
@@ -194,6 +205,11 @@ def has_auth_failure_error(text: str) -> bool:
 def has_frequency_limit_error(text: str) -> bool:
     """判断是否为平台频率限制弹窗，应立即结束当前账号流程。"""
     return _contains_any(text, FREQUENCY_LIMIT_SIGNATURES)
+
+
+def has_already_registered_error(text: str) -> bool:
+    """判断是否为注册页的已存在账户提示。"""
+    return _contains_any(text, ALREADY_REGISTERED_SIGNATURES)
 
 
 def assess_risk_text(text: str) -> RiskAssessment:

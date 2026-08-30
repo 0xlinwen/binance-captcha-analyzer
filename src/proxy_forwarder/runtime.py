@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import shutil
 import socket
 import ssl
@@ -15,6 +16,16 @@ from .logging import ProxyLogger, emit_log
 from .proxy_utils import build_proxy_url, describe_proxy, parse_proxy_text
 
 DISABLED_GOST_BINARY = "__disabled_gost__"
+
+
+def _resolve_gost_binary(value: str) -> str | None:
+    """解析 PATH 名称或 Unix/Windows 文件路径。"""
+    binary = str(value or "").strip()
+    if not binary:
+        return None
+    if "/" in binary or "\\" in binary:
+        return binary if os.path.isfile(binary) else None
+    return shutil.which(binary)
 
 
 def _is_gost_requested(gost_settings: Mapping[str, Any] | None) -> bool:
@@ -606,7 +617,7 @@ def _start_gost_chain(
     logger: ProxyLogger | None = None,
 ) -> dict[str, Any] | None:
     gost_bin = str(gost_settings.get("binary") or "gost").strip() or "gost"
-    gost_path = shutil.which(gost_bin) if "/" not in gost_bin else gost_bin
+    gost_path = _resolve_gost_binary(gost_bin)
     if not gost_path:
         emit_log(logger, "gost", "binary-not-found", binary=gost_bin)
         return None
@@ -661,7 +672,7 @@ def _start_gost_forwarder(
     logger: ProxyLogger | None = None,
 ) -> dict[str, Any] | None:
     gost_bin = str(gost_settings.get("binary") or "gost").strip() or "gost"
-    gost_path = shutil.which(gost_bin) if "/" not in gost_bin else gost_bin
+    gost_path = _resolve_gost_binary(gost_bin)
     if not gost_path:
         emit_log(logger, "gost", "binary-not-found", binary=gost_bin)
         return None

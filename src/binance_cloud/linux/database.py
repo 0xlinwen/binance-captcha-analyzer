@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS task_groups (
 CREATE TABLE IF NOT EXISTS login_job_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES login_jobs(id),
   account_id INTEGER NOT NULL REFERENCES accounts(id), status TEXT NOT NULL,
+  account_email_snapshot TEXT, account_password_snapshot TEXT,
+  account_client_id_snapshot TEXT, account_refresh_token_snapshot TEXT,
+  retry_of_job_item_id INTEGER,
   proxy_address TEXT, error_code TEXT, error_message TEXT, started_at TEXT, completed_at TEXT,
   worker_id TEXT, lease_expires_at TEXT, retry_count INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 2,
   lease_id TEXT, proxy_entry_id TEXT, dispatch_sequence INTEGER,
@@ -146,7 +149,7 @@ class Database:
         if "consecutive_failures" not in group_columns:
             self.conn.execute("ALTER TABLE task_groups ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_job_items)")}
-        for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("proxy_retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2"), ("lease_id", "TEXT"), ("proxy_entry_id", "TEXT"), ("dispatch_sequence", "INTEGER")):
+        for name, definition in (("worker_id", "TEXT"), ("lease_expires_at", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("proxy_retry_count", "INTEGER NOT NULL DEFAULT 0"), ("max_retries", "INTEGER NOT NULL DEFAULT 2"), ("lease_id", "TEXT"), ("proxy_entry_id", "TEXT"), ("dispatch_sequence", "INTEGER"), ("account_email_snapshot", "TEXT"), ("account_password_snapshot", "TEXT"), ("account_client_id_snapshot", "TEXT"), ("account_refresh_token_snapshot", "TEXT"), ("retry_of_job_item_id", "INTEGER")):
             if name not in columns:
                 self.conn.execute(f"ALTER TABLE login_job_items ADD COLUMN {name} {definition}")
         pool_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(proxy_pool_entries)")}
@@ -374,7 +377,7 @@ class Database:
             self.conn.execute("INSERT INTO task_groups(id,total_count,created_at) VALUES(?,?,?)", (group_id, total_count, utc_now()))
         return self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
 
-    def create_job(self, accounts: list[dict], proxy: dict | None = None, *, task_mode: str = "login", task_group_id: str | None = None, idempotency_key: str | None = None) -> dict:
+    def create_job(self, accounts: list[dict], proxy: dict | None = None, *, task_mode: str = "login", task_group_id: str | None = None, idempotency_key: str | None = None, update_accounts: bool = True) -> dict:
         if not accounts:
             raise ValueError("任务至少需要一个账号")
         proxy = proxy or {}
@@ -413,15 +416,25 @@ class Database:
                               (job_id, "submitted", task_mode, idempotency_key, mode, profile, address, limit, len(accounts), task_group_id, now))
             quota_exceeded = 0
             for index, account in enumerate(accounts):
-                self.conn.execute("""INSERT INTO accounts(email,password,client_id,refresh_token,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password=excluded.password,client_id=excluded.client_id,refresh_token=excluded.refresh_token,updated_at=excluded.updated_at""",
-                                  (account["email"], account["password"], account.get("client_id"), account.get("refresh_token"), now, now))
+                if update_accounts:
+                    self.conn.execute("""INSERT INTO accounts(email,password,client_id,refresh_token,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password=excluded.password,client_id=excluded.client_id,refresh_token=excluded.refresh_token,updated_at=excluded.updated_at""",
+                                      (account["email"], account["password"], account.get("client_id"), account.get("refresh_token"), now, now))
                 row = self._one("SELECT id FROM accounts WHERE email=?", (account["email"],))
+                if not row:
+                    raise ValueError(f"重派账号不存在: {account['email']}")
                 item_status = "queued"
                 if mode == "fixed" and index >= limit:
                     item_status = "proxy_quota_exceeded"
                     quota_exceeded += 1
-                self.conn.execute("INSERT INTO login_job_items(job_id,account_id,status,proxy_address) VALUES(?,?,?,?)", (job_id, row["id"], item_status, address))
+                self.conn.execute(
+                    """INSERT INTO login_job_items(job_id,account_id,status,proxy_address,
+                         account_email_snapshot,account_password_snapshot,
+                         account_client_id_snapshot,account_refresh_token_snapshot,retry_of_job_item_id)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (job_id, row["id"], item_status, address, account["email"], account["password"],
+                     account.get("client_id"), account.get("refresh_token"), account.get("retry_of_job_item_id")),
+                )
             if quota_exceeded:
                 self.conn.execute("UPDATE login_jobs SET failed_count=? WHERE id=?", (quota_exceeded, job_id))
             if mode == "fixed":
@@ -435,6 +448,73 @@ class Database:
         if not account:
             raise ValueError("账号不存在")
         return self.create_job([account], proxy, task_mode="login")
+
+    def failed_items(self, job_id: str) -> list[dict]:
+        """返回可重派的最终失败项，不返回密码或邮箱 OAuth 凭证。"""
+        if not self._one("SELECT id FROM login_jobs WHERE id=?", (job_id,)):
+            raise ValueError("任务不存在")
+        items = [dict(row) for row in self.conn.execute(
+            """SELECT i.id AS job_item_id, i.account_id,
+                      COALESCE(i.account_email_snapshot, a.email) AS email,
+                      i.status, i.error_code, i.error_message, i.worker_id,
+                      i.proxy_address, i.proxy_entry_id, i.dispatch_sequence,
+                      i.retry_count, i.proxy_retry_count, i.started_at, i.completed_at,
+                      i.retry_of_job_item_id
+                 FROM login_job_items i JOIN accounts a ON a.id=i.account_id
+                WHERE i.job_id=? AND i.status='failed' ORDER BY i.id""",
+            (job_id,),
+        )]
+        for item in items:
+            item["proxy_address"] = _redact_proxy_address(item.get("proxy_address"))
+        return items
+
+    def create_failed_items_retry_job(self, source_job_id: str, item_ids: list[int] | None = None, proxy: dict | None = None, idempotency_key: str | None = None) -> dict:
+        """基于失败项创建时快照重派，不因账号表后续更新而改变历史凭据。"""
+        source = self._one("SELECT * FROM login_jobs WHERE id=?", (source_job_id,))
+        if not source:
+            raise ValueError("源任务不存在")
+        failed = self.failed_items(source_job_id)
+        allowed_ids = {row["job_item_id"] for row in failed}
+        selected_ids = list(allowed_ids) if item_ids is None else item_ids
+        if not selected_ids:
+            raise ValueError("源任务没有可重派的失败账号")
+        if len(selected_ids) != len(set(selected_ids)):
+            raise ValueError("任务明细 ID 不可重复")
+        invalid_ids = [item_id for item_id in selected_ids if item_id not in allowed_ids]
+        if invalid_ids:
+            raise ValueError(f"仅可重派当前任务最终失败项: {invalid_ids}")
+
+        rows = {row["id"]: row for row in self.conn.execute(
+            """SELECT i.*, a.email AS account_email, a.password AS account_password,
+                      a.client_id AS account_client_id, a.refresh_token AS account_refresh_token
+                 FROM login_job_items i JOIN accounts a ON a.id=i.account_id
+                WHERE i.job_id=?""",
+            (source_job_id,),
+        )}
+        accounts = [
+            {
+                "email": row["account_email_snapshot"] or row["account_email"],
+                "password": row["account_password_snapshot"] or row["account_password"],
+                "client_id": row["account_client_id_snapshot"] or row["account_client_id"],
+                "refresh_token": row["account_refresh_token_snapshot"] or row["account_refresh_token"],
+                "retry_of_job_item_id": item_id,
+            }
+            for item_id in selected_ids
+            for row in [rows[item_id]]
+        ]
+        inherited_proxy = {
+            "mode": source["proxy_mode"],
+            "proxy_profile": source["proxy_profile"],
+            "address": source["proxy_address"],
+            "max_accounts_per_job": source["max_accounts_per_proxy"],
+        }
+        return self.create_job(
+            accounts,
+            proxy if proxy is not None else inherited_proxy,
+            task_mode=source["task_mode"],
+            idempotency_key=idempotency_key,
+            update_accounts=False,
+        )
 
     def task_group(self, group_id: str):
         group = self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
@@ -528,7 +608,17 @@ class Database:
     def get_job(self, job_id: str):
         job = self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
         if job:
-            job["items"] = [dict(r) for r in self.conn.execute("SELECT i.*, a.email FROM login_job_items i JOIN accounts a ON a.id=i.account_id WHERE job_id=? ORDER BY i.id", (job_id,))]
+            job["items"] = [dict(r) for r in self.conn.execute(
+                """SELECT i.id, i.job_id, i.account_id, i.status,
+                          COALESCE(i.account_email_snapshot, a.email) AS email,
+                          i.proxy_address, i.error_code, i.error_message,
+                          i.started_at, i.completed_at, i.worker_id, i.lease_expires_at,
+                          i.retry_count, i.proxy_retry_count, i.max_retries, i.lease_id,
+                          i.proxy_entry_id, i.dispatch_sequence, i.retry_of_job_item_id
+                     FROM login_job_items i JOIN accounts a ON a.id=i.account_id
+                    WHERE i.job_id=? ORDER BY i.id""",
+                (job_id,),
+            )]
         return job
 
     def job_status(self, job_id: str) -> str | None:
@@ -539,6 +629,11 @@ class Database:
         job = self.get_job(job_id)
         if not job:
             raise ValueError("任务不存在")
+        items = [dict(row) for row in self.conn.execute(
+            "SELECT i.*, COALESCE(i.account_email_snapshot, a.email) AS email "
+            "FROM login_job_items i JOIN accounts a ON a.id=i.account_id WHERE i.job_id=? ORDER BY i.id",
+            (job_id,),
+        )]
         return {
             "job_id": job_id,
             "mode": job["task_mode"],
@@ -547,9 +642,10 @@ class Database:
             "accounts": [
                 {"job_item_id": item["id"], "account_id": item["account_id"], "email": item["email"],
                  "lease_id": item.get("lease_id"), "proxy_entry_id": item.get("proxy_entry_id"), "dispatch_sequence": item.get("dispatch_sequence"),
-                 **{key: self._one("SELECT password,client_id,refresh_token FROM accounts WHERE id=?", (item["account_id"],))[key]
-                    for key in ("password", "client_id", "refresh_token")}}
-                for item in job["items"] if item["status"] in {"queued", "running"}
+                 "password": item.get("account_password_snapshot") or self._one("SELECT password FROM accounts WHERE id=?", (item["account_id"],))["password"],
+                 "client_id": item.get("account_client_id_snapshot") or self._one("SELECT client_id FROM accounts WHERE id=?", (item["account_id"],))["client_id"],
+                 "refresh_token": item.get("account_refresh_token_snapshot") or self._one("SELECT refresh_token FROM accounts WHERE id=?", (item["account_id"],))["refresh_token"]}
+                for item in items if item["status"] in {"queued", "running"}
             ],
         }
 

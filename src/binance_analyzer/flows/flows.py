@@ -29,6 +29,7 @@ from .page_signals import (
     detect_register_url_state,
     has_auth_failure_error,
     has_frequency_limit_error,
+    has_already_registered_error,
     has_proxy_failure_error,
     is_browser_network_error_url,
     is_dashboard_url,
@@ -191,6 +192,10 @@ def _has_auth_failure_error(text: str) -> bool:
 
 def _has_frequency_limit_error(text: str) -> bool:
     return has_frequency_limit_error(text)
+
+
+def _has_already_registered_error(text: str) -> bool:
+    return has_already_registered_error(text)
 
 
 def _get_body_text(page) -> str:
@@ -510,13 +515,13 @@ def _tick_agreement_checkbox(page, email_addr=None, logger=None):
 
 
 def _dismiss_error_popup(page, logger=None):
-    """检查并点击"已知晓"等弹窗按钮，包括频率限制弹窗"""
-    # 先检测是否有频率限制弹窗
+    """检查并点击普通错误弹窗；频率限制弹窗绝不点击。"""
     try:
         body_text = page.inner_text("body")
-        if "frequency limit" in body_text.lower() or "208061" in body_text:
+        if has_frequency_limit_error(body_text):
             if logger:
-                logger.info("检测到频率限制弹窗 (208061)")
+                logger.info("检测到频率限制弹窗 (208061)，跳过普通弹窗处理")
+            return False
     except Exception:
         pass
 

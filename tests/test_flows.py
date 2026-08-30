@@ -12,6 +12,7 @@ from binance_analyzer.flows.flows import (
     _has_auth_failure_error,
     _has_proxy_failure_error,
     _has_frequency_limit_error,
+    _has_already_registered_error,
     _continue_login_after_auth_failure,
     _is_logged_in_url,
     _retry_auth_failure_continue,
@@ -53,6 +54,12 @@ class FlowUrlTests(unittest.TestCase):
         self.assertTrue(_has_frequency_limit_error("You have triggered a frequency limit. (208061-209406dc)"))
         self.assertTrue(_has_frequency_limit_error("频率限制 208061"))
         self.assertFalse(_has_frequency_limit_error("认证失败，请刷新页面后重试"))
+
+    def test_already_registered_popup_is_detected(self) -> None:
+        self.assertTrue(_has_already_registered_error("已经存在账户\n账号已经存在，请登录后继续"))
+        self.assertTrue(_has_already_registered_error("Account already exists"))
+        self.assertTrue(_has_already_registered_error("Email already registered"))
+        self.assertFalse(_has_already_registered_error("创建账户"))
 
     def test_captcha_auth_failure_stops_without_proxy_retry(self) -> None:
         should_stop, fail_count, reason = _handle_captcha_result(
