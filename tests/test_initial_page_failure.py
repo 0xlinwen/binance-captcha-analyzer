@@ -66,6 +66,30 @@ class InitialPageFailureTests(unittest.TestCase):
 
         self.assertIs(status, AccountStatus.PROXY_FAILED)
 
+    @patch("binance_analyzer.flows.register_flow.save_failure_log")
+    @patch("binance_analyzer.flows.register_flow.goto_with_retry", return_value=False)
+    @patch("binance_analyzer.flows.register_flow.console_log")
+    @patch("binance_analyzer.flows.register_flow.setup_logger")
+    def test_register_warmup_page_load_failure_is_proxy_failed(
+        self,
+        mock_setup_logger,
+        _mock_console_log,
+        mock_goto_with_retry,
+        _mock_save_failure_log,
+    ) -> None:
+        mock_setup_logger.return_value = Mock()
+        config = _config()
+        config["register"] = {
+            "warmup_url": "https://www.binance.com/zh-CN",
+            "start_url": "https://accounts.binance.com/zh-CN/register",
+        }
+
+        status = register_flow.register_with_url_state(Mock(), "alice@example.com", "pass", config)
+
+        self.assertIs(status, AccountStatus.PROXY_FAILED)
+        mock_goto_with_retry.assert_called_once()
+        self.assertEqual(mock_goto_with_retry.call_args.args[1], "https://www.binance.com/zh-CN")
+
     @patch("binance_analyzer.flows.login_flow.save_failure_log")
     @patch("binance_analyzer.flows.login_flow._continue_login_after_auth_failure", return_value=False)
     @patch("binance_analyzer.flows.login_flow._get_body_text", return_value="认证失败，请刷新页面后重试。(208075-838bc7b0)")
@@ -134,6 +158,44 @@ class InitialPageFailureTests(unittest.TestCase):
         status = register_flow.register_with_url_state(page, "alice@example.com", "", config)
 
         self.assertIs(status, AccountStatus.EMAIL_VERIFICATION_REQUIRED)
+        mock_handle_email_verification.assert_not_called()
+
+    @patch("binance_analyzer.flows.register_flow.handle_email_verification")
+    @patch("binance_analyzer.flows.register_flow._has_risk_error", return_value=(False, ""))
+    @patch("binance_analyzer.flows.register_flow._is_page_blank", return_value=False)
+    @patch("binance_analyzer.flows.register_flow.goto_with_retry", return_value=True)
+    @patch("binance_analyzer.flows.register_flow.console_log")
+    @patch("binance_analyzer.flows.register_flow.setup_logger")
+    def test_register_visits_warmup_url_before_register_page(
+        self,
+        mock_setup_logger,
+        _mock_console_log,
+        mock_goto_with_retry,
+        _mock_is_page_blank,
+        _mock_has_risk_error,
+        mock_handle_email_verification,
+    ) -> None:
+        mock_setup_logger.return_value = Mock()
+        config = _config()
+        config["mfa"]["email_verification_enabled"] = False
+        config["register"] = {
+            "warmup_url": "https://www.binance.com/zh-CN",
+            "start_url": "https://accounts.binance.com/zh-CN/register",
+        }
+        page = Mock()
+        page.url = "https://accounts.binance.com/zh-CN/register/verification"
+        page.inner_text.return_value = ""
+        page.query_selector.return_value = None
+
+        status = register_flow.register_with_url_state(page, "alice@example.com", "", config)
+
+        self.assertIs(status, AccountStatus.EMAIL_VERIFICATION_REQUIRED)
+        self.assertEqual(mock_goto_with_retry.call_count, 2)
+        self.assertEqual(mock_goto_with_retry.call_args_list[0].args[1], "https://www.binance.com/zh-CN")
+        self.assertEqual(
+            mock_goto_with_retry.call_args_list[1].args[1],
+            "https://accounts.binance.com/zh-CN/register",
+        )
         mock_handle_email_verification.assert_not_called()
 
     @patch("binance_analyzer.flows.register_flow.handle_email_verification")

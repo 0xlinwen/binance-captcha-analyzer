@@ -10,6 +10,15 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .file_lock import lock, unlock
+
+# Playwright response.body() 已是解压后的字节。回放时若带上 gzip/br，页面会解压失败。
+_DROP_RESPONSE_HEADERS = {
+    "content-encoding",
+    "content-length",
+    "transfer-encoding",
+}
+
 
 class LocalCacheManager:
     def __init__(self, cache_dir: Path):
@@ -25,22 +34,41 @@ class LocalCacheManager:
         }
 
     def _load_index(self):
-        """加载缓存索引"""
+        """加载缓存索引。"""
         if self.index_file.exists():
             try:
-                with open(self.index_file, "r") as f:
-                    return json.load(f)
+                with open(self.index_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    return loaded
             except Exception:
                 pass
         return {}
 
     def _save_index(self):
-        """保存缓存索引"""
+        """保存缓存索引。"""
+        lock_path = self.index_file.with_suffix(self.index_file.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(self.index_file, "w") as f:
-                json.dump(self.index, f)
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                lock(lock_file)
+                try:
+                    with open(self.index_file, "w", encoding="utf-8") as f:
+                        json.dump(self.index, f)
+                finally:
+                    unlock(lock_file)
         except Exception:
             pass
+
+    @staticmethod
+    def sanitize_cached_headers(headers: dict) -> dict:
+        """去掉压缩/长度头，避免把已解压正文当成 gzip/br 回放。"""
+        sanitized = {}
+        for key, value in (headers or {}).items():
+            if str(key).lower() in _DROP_RESPONSE_HEADERS:
+                continue
+            sanitized[str(key)] = value
+        return sanitized
 
     def _get_cache_key(self, url: str) -> str:
         """生成缓存键（去除查询参数中的时间戳等动态部分）"""
@@ -92,11 +120,13 @@ class LocalCacheManager:
             try:
                 with open(cache_path, "rb") as f:
                     body = f.read()
+                if not body:
+                    return None
                 self.stats["hits"] += 1
                 self.stats["bytes_saved"] += len(body)
                 return {
                     "body": body,
-                    "headers": self.index[cache_key].get("headers", {}),
+                    "headers": self.sanitize_cached_headers(self.index[cache_key].get("headers", {})),
                 }
             except Exception:
                 pass
@@ -108,19 +138,20 @@ class LocalCacheManager:
         """保存资源到缓存"""
         if not self._is_cacheable(url, resource_type):
             return
+        if not body:
+            return
 
         cache_key = self._get_cache_key(url)
         cache_path = self._get_cache_path(cache_key)
+        header_map = {str(key).lower(): value for key, value in (headers or {}).items()}
 
         try:
             with open(cache_path, "wb") as f:
                 f.write(body)
 
-            # 只保存必要的响应头
             saved_headers = {}
-            for key in ["content-type", "content-encoding"]:
-                if key in headers:
-                    saved_headers[key] = headers[key]
+            if "content-type" in header_map:
+                saved_headers["content-type"] = header_map["content-type"]
 
             self.index[cache_key] = {
                 "url": url[:200],
@@ -146,7 +177,7 @@ _cache_lock = threading.Lock()
 _cache_manager = None
 
 
-def get_cache_manager(cache_dir: Path = None) -> LocalCacheManager:
+def get_cache_manager(cache_dir: Path = None) -> LocalCacheManager | None:
     """获取缓存管理器单例"""
     global _cache_manager
     with _cache_lock:

@@ -56,12 +56,13 @@ def click_button(scope, texts):
 def dismiss_cookie_popup(page):
     try:
         cookie_btns = [
+            "#onetrust-reject-all-handler",
+            "#onetrust-accept-btn-handler",
+            "button:has-text('接受所有 Cookie')",
+            "button:has-text('全部拒绝')",
             "button:has-text('接受所有')",
             "button:has-text('Accept All')",
-            "button:has-text('全部拒绝')",
             "button:has-text('Reject All')",
-            "#onetrust-accept-btn-handler",
-            "#onetrust-reject-all-handler",
         ]
         for selector in cookie_btns:
             try:
@@ -92,6 +93,11 @@ def input_email(page, email_addr):
         "input[type='email']",
         "input[id*='email']",
     ]
+    primary_selector = ", ".join(email_selectors[:4])
+    try:
+        page.wait_for_selector(primary_selector, state="visible", timeout=8000)
+    except Exception:
+        pass
 
     email_input = None
     for selector in email_selectors:
@@ -305,6 +311,7 @@ def goto_with_retry(page, url, page_timeout, max_retries=3):
             page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
             page.wait_for_timeout(random.randint(1800, 2200))
             dismiss_global_modal(page, logger=logger)
+            dismiss_cookie_popup(page)
 
             body_text = ""
             try:

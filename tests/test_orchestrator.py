@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from binance_analyzer.automation.orchestrator import (
+    PROJECT_ROOT,
     _build_account_proxy_config,
     register_account,
 )
@@ -13,6 +14,11 @@ from binance_analyzer.results import AccountStatus, AutomationResult
 
 
 class OrchestratorProxyIpTests(unittest.TestCase):
+    def test_project_root_points_at_repo_not_src(self) -> None:
+        self.assertTrue((PROJECT_ROOT / "main.py").is_file())
+        self.assertTrue((PROJECT_ROOT / "config").is_dir())
+        self.assertNotEqual(PROJECT_ROOT.name, "src")
+
     def test_build_account_proxy_config_uses_ephemeral_gost_port(self) -> None:
         proxy_config = {
             "enabled": True,

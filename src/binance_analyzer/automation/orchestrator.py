@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 from .automation_driver import build_driver
 from ..storage.registered_account_storage import save_registered_account
 from ..runtime.local_cache import init_cache_manager
-from ..fingerprint import generate_fingerprint
+from ..fingerprint import describe_fingerprint, generate_fingerprint, is_native_fingerprint
 from .cache_routes import handle_cache_route, track_cache_response
 from .browser_context import (
     build_stealth_context,
@@ -16,6 +16,7 @@ from .browser_context import (
     cleanup_subprocess_browser,
     get_launch_args,
 )
+from ..integrations.local_proxy_pool import bind_local_rotating_proxy
 from ..integrations.proxy_integration import (
     build_proxy_launch_config,
     create_proxy_runtime,
@@ -31,7 +32,9 @@ from ..storage.credential_export import export_credentials
 from ..runtime.logger import get_logger_manager
 
 PAGE_TIMEOUT = 60000
-CACHE_DIR = Path(__file__).resolve().parents[2] / ".browser_cache"
+# orchestrator.py 位于 src/binance_analyzer/automation/，项目根是 parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+CACHE_DIR = PROJECT_ROOT / ".browser_cache"
 MASTER_CACHE_DIR = CACHE_DIR / "master"
 
 def _safe_int(value, default: int) -> int:
@@ -53,52 +56,70 @@ def warmup_cache(proxy_config=None, headless=True):
     print("预热浏览器缓存...")
     MASTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     init_cache_manager(CACHE_DIR)
-    fingerprint = generate_fingerprint(use_real_profile=True)
+    fingerprint = generate_fingerprint(use_real_profile=True, mode="native")
     proxy_runtime = None
     proxy_settings = None
-    base_dir = Path(__file__).resolve().parents[2]
-    if proxy_config and proxy_config.get("enabled"):
-        proxy_runtime = create_proxy_runtime(
-            {
-                "mode": "login",
-                "login": {"start_url": "https://accounts.binance.com/zh-CN/login"},
-                "proxy": proxy_config,
-            },
-            max_attempts=_safe_int(proxy_config.get("max_attempts", 3), 3),
-            skip_check=True,
-            logger=make_proxy_logger("[cache]"),
-        )
-        proxy_settings = build_proxy_launch_config(proxy_runtime)
-        if proxy_settings:
-            print(f"[cache] 代理就绪: {describe_proxy_runtime(proxy_runtime)}")
-        else:
-            stop_managed_proxy_runtime(proxy_runtime)
-            raise RuntimeError("缓存预热代理初始化失败：proxy.enabled=true 时禁止回退为直连")
-
+    base_dir = PROJECT_ROOT
+    pool_manager = None
+    lease_id = None
+    lease_result = "proxy_failed"
     try:
-        with sync_playwright() as p:
-            launch_args = get_launch_args(fingerprint['screen_width'], fingerprint['screen_height'])
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(MASTER_CACHE_DIR),
-                headless=headless,
-                channel="chrome",
-                args=launch_args,
-                proxy=proxy_settings,
-                user_agent=fingerprint['user_agent'],
-                locale=fingerprint['locale'],
-                timezone_id=fingerprint['timezone_id'],
-                viewport={
-                    "width":  fingerprint['screen_width'],
-                    "height": fingerprint['screen_height'] - 80,
+        if proxy_config and proxy_config.get("enabled"):
+            runtime_proxy, pool_manager, lease_id = bind_local_rotating_proxy(base_dir, proxy_config)
+            if str(proxy_config.get("mode") or "").strip().lower() == "rotating_single_ip" and not lease_id:
+                raise RuntimeError("缓存预热代理初始化失败：固定池没有可用条目")
+            proxy_runtime = create_proxy_runtime(
+                {
+                    "mode": "login",
+                    "login": {"start_url": "https://accounts.binance.com/zh-CN/login"},
+                    "proxy": runtime_proxy,
                 },
-                screen={
-                    "width":  fingerprint['screen_width'],
-                    "height": fingerprint['screen_height'],
-                },
-                device_scale_factor=fingerprint['device_pixel_ratio'],
+                max_attempts=_safe_int(proxy_config.get("max_attempts", 3), 3),
+                skip_check=True,
+                logger=make_proxy_logger("[cache]"),
             )
+            proxy_settings = build_proxy_launch_config(proxy_runtime)
+            if proxy_settings:
+                print(f"[cache] 代理就绪: {describe_proxy_runtime(proxy_runtime)}")
+            else:
+                stop_managed_proxy_runtime(proxy_runtime)
+                proxy_runtime = None
+                raise RuntimeError("缓存预热代理初始化失败：proxy.enabled=true 时禁止回退为直连")
+
+        with sync_playwright() as p:
+            launch_kwargs = {
+                "user_data_dir": str(MASTER_CACHE_DIR),
+                "headless": headless,
+                "channel": "chrome",
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+                "proxy": proxy_settings,
+            }
+            if not is_native_fingerprint(fingerprint):
+                launch_kwargs["args"] = get_launch_args(
+                    fingerprint["screen_width"], fingerprint["screen_height"]
+                )
+                launch_kwargs.update(
+                    user_agent=fingerprint["user_agent"],
+                    locale=fingerprint["locale"],
+                    timezone_id=fingerprint["timezone_id"],
+                    viewport={
+                        "width": fingerprint["screen_width"],
+                        "height": fingerprint["screen_height"] - 80,
+                    },
+                    screen={
+                        "width": fingerprint["screen_width"],
+                        "height": fingerprint["screen_height"],
+                    },
+                    device_scale_factor=fingerprint["device_pixel_ratio"],
+                )
+            context = p.chromium.launch_persistent_context(**launch_kwargs)
             try:
-                context.add_init_script(build_stealth_init_script(fingerprint))
+                if not is_native_fingerprint(fingerprint):
+                    context.add_init_script(build_stealth_init_script(fingerprint))
                 page = context.new_page()
                 page.route("**/*", handle_cache_route)
                 page.on("response", track_cache_response)
@@ -114,10 +135,13 @@ def warmup_cache(proxy_config=None, headless=True):
                         print(f"  加载异常: {e}，继续...")
                 context.clear_cookies()
                 print("缓存预热完成")
+                lease_result = "success"
             finally:
                 context.close()
     finally:
         stop_managed_proxy_runtime(proxy_runtime)
+        if pool_manager and lease_id:
+            pool_manager.release(lease_id, result_status=lease_result)
 
 
 def _get_worker_cache_dir(worker_id: int) -> Path:
@@ -224,137 +248,148 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
 
     browser = None
     proxy_runtime = None
+    pool_manager = None
+    lease_id = None
+    automation_result = AutomationResult.from_status(AccountStatus.FAILED)
 
     get_logger_manager(base_dir=base_dir / "logs")
 
-    with sync_playwright() as p:
-        fingerprint = generate_fingerprint(use_real_profile=False)
-        print(
-            f"[Worker-{worker_id}] 指纹: "
-            f"UA={fingerprint['user_agent'][-40:]} | "
-            f"TZ={fingerprint['timezone_id']} | "
-            f"Screen={fingerprint['screen_width']}x{fingerprint['screen_height']} | "
-            f"DPR={fingerprint['device_pixel_ratio']} | "
-            f"Lang={fingerprint['languages']}"
-        )
+    try:
+        with sync_playwright() as p:
+            fingerprint_mode = str((config.get("fingerprint") or {}).get("mode") or "native").strip().lower()
+            fingerprint = generate_fingerprint(use_real_profile=False, mode=fingerprint_mode)
+            print(f"[Worker-{worker_id}] 指纹: {describe_fingerprint(fingerprint)}")
 
-        proxy_settings = None
-        if proxy_enabled:
-            runtime_config = {**config, "proxy": _build_account_proxy_config(proxy_config)}
-            proxy_runtime = create_proxy_runtime(
-                runtime_config,
-                max_attempts=_safe_int(proxy_config.get("max_attempts", 5), 5),
-                require_exit_ip=True,
-                logger=make_proxy_logger(f"[Worker-{worker_id}]"),
-            )
-            proxy_settings = build_proxy_launch_config(proxy_runtime)
-            if proxy_settings:
-                print(f"[Worker-{worker_id}] 使用代理运行时: {describe_proxy_runtime(proxy_runtime)}")
-            else:
-                print(f"[Worker-{worker_id}] 代理初始化失败，停止当前账号并重试")
-                stop_managed_proxy_runtime(proxy_runtime)
-                return AutomationResult.from_status(AccountStatus.PROXY_FAILED)
-
-        print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（完整反检测）")
-        browser, context, page = build_stealth_context(p, fingerprint, proxy_settings, headless)
-
-        # ── 修复: 初始化缓存（之前只在 warmup_cache 里初始化，register_account 里从未调用）
-        if config.get("cache", {}).get("enabled", False):
-            init_cache_manager(CACHE_DIR)
-            _init_worker_cache(worker_id)  # 从 master 缓存复制到 worker 目录
-            # 只在缓存启用时注册路由拦截（page.route 会启用 CDP Fetch.enable，是自动化特征）
-            page.route("**/*", handle_cache_route)
-            page.on("response", track_cache_response)
-            print(f"[Worker-{worker_id}] 缓存已启用")
-
-        try:
-            print(f"\n[Worker-{worker_id}] 模式: {'注册' if mode == 'register' else '登录'}")
-            automation_result = build_driver(mode).run(
-                page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT
-            )
-            flow_result = _finish_flow_status(automation_result.status, worker_id, mode=mode)
-            if flow_result is not None:
-                return replace(
-                    automation_result,
-                    status=flow_result,
-                    error_code=flow_result.value,
+            proxy_settings = None
+            if proxy_enabled:
+                runtime_proxy, pool_manager, lease_id = bind_local_rotating_proxy(base_dir, proxy_config)
+                if str(proxy_config.get("mode") or "").strip().lower() == "rotating_single_ip" and not lease_id:
+                    print(f"[Worker-{worker_id}] 固定池没有可用条目，停止当前账号并重试")
+                    automation_result = AutomationResult.from_status(AccountStatus.PROXY_FAILED)
+                    return automation_result
+                if lease_id:
+                    static = runtime_proxy.get("static") or {}
+                    print(f"[Worker-{worker_id}] 固定池条目: {static.get('host')}:{static.get('port')}")
+                runtime_config = {**config, "proxy": runtime_proxy}
+                proxy_runtime = create_proxy_runtime(
+                    runtime_config,
+                    max_attempts=_safe_int(proxy_config.get("max_attempts", 5), 5),
+                    require_exit_ip=True,
+                    logger=make_proxy_logger(f"[Worker-{worker_id}]"),
                 )
+                proxy_settings = build_proxy_launch_config(proxy_runtime)
+                if proxy_settings:
+                    print(f"[Worker-{worker_id}] 使用代理运行时: {describe_proxy_runtime(proxy_runtime)}")
+                else:
+                    print(f"[Worker-{worker_id}] 代理初始化失败，停止当前账号并重试")
+                    stop_managed_proxy_runtime(proxy_runtime)
+                    proxy_runtime = None
+                    automation_result = AutomationResult.from_status(AccountStatus.PROXY_FAILED)
+                    return automation_result
 
-            # 访问 dashboard
-            print(f"\n[Worker-{worker_id}] 访问 dashboard...")
-            dashboard_url = "https://www.binance.com/zh-CN/my/dashboard"
-            dashboard_loaded = False
-            for attempt in range(3):
-                try:
-                    page.goto(dashboard_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
-                    page.wait_for_timeout(random.randint(2000, 3000))
-                    if is_dashboard_url(page.url):
-                        dashboard_loaded = True
-                        break
-                    print(f"[Worker-{worker_id}] dashboard 未完全加载，重试 ({attempt+1}/3)")
-                except Exception as e:
-                    print(f"[Worker-{worker_id}] 访问 dashboard 失败 ({attempt+1}/3): {e}")
-                    page.wait_for_timeout(1000)
+            browser_mode_label = "native 真实身份" if is_native_fingerprint(fingerprint) else "spoofed 伪装指纹"
+            print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（{browser_mode_label}）")
+            browser, context, page = build_stealth_context(p, fingerprint, proxy_settings, headless)
 
-            if not dashboard_loaded:
-                try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
+            # ── 修复: 初始化缓存（之前只在 warmup_cache 里初始化，register_account 里从未调用）
+            if config.get("cache", {}).get("enabled", False):
+                init_cache_manager(CACHE_DIR)
+                # 主流程 Chrome 使用临时 user-data-dir，复制 master 磁盘缓存不会生效。
+                # 实际生效的是下面的应用层路由缓存；page.route 会打开 CDP Fetch。
+                page.route("**/*", handle_cache_route)
+                page.on("response", track_cache_response)
+                print(f"[Worker-{worker_id}] 缓存已启用")
 
-            # 提取 cookie
-            print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
-            credentials = export_credentials(page)
-            automation_result = replace(automation_result, credentials=credentials)
-            cookie_string, csrftoken = credentials.cookie, credentials.csrftoken
-            if cookie_string and csrftoken:
-                account_data = {
-                    "name":             f"账号_{email_addr.split('@')[0]}",
-                    "email":            f"{email_addr}----{email_password}",
-                    "password":         email_password,
-                    "cookie":           cookie_string,
-                    "csrftoken":        csrftoken,
-                    "credential_exported_at": credentials.credential_exported_at,
-                    "enabled":          True,
-                    "avatar_changed":   False,
-                    "nickname_changed": False,
-                    "display_name":     "",
-                    "username":         "",
-                    "mail_api_url":     "https://wrpifa-com.netlify.app/",
-                }
-                save_registered_account(base_dir, output_file, account_data)
-                creator_cfg = config.get("creator_api", {})
-                if creator_cfg.get("enabled"):
-                    slot_token = acquire_creator_api_slot(base_dir, config)
-                    if slot_token is None:
-                        print(f"[Worker-{worker_id}] 创作者 API 已达到本次提取配额，跳过")
-                    else:
-                        print(f"\n[Worker-{worker_id}] 提取创作者中心 API...")
-                        try:
-                            creator_profile = extract_creator_api(page, base_dir, page_timeout=PAGE_TIMEOUT)
-                            account_data.update(api_metadata(creator_profile))
-                            save_registered_account(base_dir, output_file, account_data)
-                        except Exception as exc:
-                            release_creator_api_slot(base_dir, config, slot_token, completed=False)
-                            print(f"[Worker-{worker_id}] 创作者 API 提取失败，Cookie 已保存: {exc}")
+            try:
+                print(f"\n[Worker-{worker_id}] 模式: {'注册' if mode == 'register' else '登录'}")
+                automation_result = build_driver(mode).run(
+                    page, email_addr, email_password, config, page_timeout=PAGE_TIMEOUT
+                )
+                flow_result = _finish_flow_status(automation_result.status, worker_id, mode=mode)
+                if flow_result is not None:
+                    automation_result = replace(
+                        automation_result,
+                        status=flow_result,
+                        error_code=flow_result.value,
+                    )
+                    return automation_result
+
+                # 访问 dashboard
+                print(f"\n[Worker-{worker_id}] 访问 dashboard...")
+                dashboard_url = "https://www.binance.com/zh-CN/my/dashboard"
+                dashboard_loaded = False
+                for attempt in range(3):
+                    try:
+                        page.goto(dashboard_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+                        page.wait_for_timeout(random.randint(2000, 3000))
+                        if is_dashboard_url(page.url):
+                            dashboard_loaded = True
+                            break
+                        print(f"[Worker-{worker_id}] dashboard 未完全加载，重试 ({attempt+1}/3)")
+                    except Exception as e:
+                        print(f"[Worker-{worker_id}] 访问 dashboard 失败 ({attempt+1}/3): {e}")
+                        page.wait_for_timeout(1000)
+
+                if not dashboard_loaded:
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2000)
+
+                # 提取 cookie
+                print(f"\n[Worker-{worker_id}] 提取 cookie 和 csrftoken...")
+                credentials = export_credentials(page)
+                automation_result = replace(automation_result, credentials=credentials)
+                cookie_string, csrftoken = credentials.cookie, credentials.csrftoken
+                if cookie_string and csrftoken:
+                    account_data = {
+                        "name":             f"账号_{email_addr.split('@')[0]}",
+                        "email":            f"{email_addr}----{email_password}",
+                        "password":         email_password,
+                        "cookie":           cookie_string,
+                        "csrftoken":        csrftoken,
+                        "credential_exported_at": credentials.credential_exported_at,
+                        "enabled":          True,
+                        "avatar_changed":   False,
+                        "nickname_changed": False,
+                        "display_name":     "",
+                        "username":         "",
+                        "mail_api_url":     "https://wrpifa-com.netlify.app/",
+                    }
+                    save_registered_account(base_dir, output_file, account_data)
+                    creator_cfg = config.get("creator_api", {})
+                    if creator_cfg.get("enabled"):
+                        slot_token = acquire_creator_api_slot(base_dir, config)
+                        if slot_token is None:
+                            print(f"[Worker-{worker_id}] 创作者 API 已达到本次提取配额，跳过")
                         else:
-                            release_creator_api_slot(base_dir, config, slot_token, completed=True)
-                            print(f"[Worker-{worker_id}] API 提取成功（已隐藏密钥）")
-                print(f"\n[Worker-{worker_id}] 处理成功: {email_addr}")
+                            print(f"\n[Worker-{worker_id}] 提取创作者中心 API...")
+                            try:
+                                creator_profile = extract_creator_api(page, base_dir, page_timeout=PAGE_TIMEOUT)
+                                account_data.update(api_metadata(creator_profile))
+                                save_registered_account(base_dir, output_file, account_data)
+                            except Exception as exc:
+                                release_creator_api_slot(base_dir, config, slot_token, completed=False)
+                                print(f"[Worker-{worker_id}] 创作者 API 提取失败，Cookie 已保存: {exc}")
+                            else:
+                                release_creator_api_slot(base_dir, config, slot_token, completed=True)
+                                print(f"[Worker-{worker_id}] API 提取成功（已隐藏密钥）")
+                    print(f"\n[Worker-{worker_id}] 处理成功: {email_addr}")
+                    return automation_result
+
+                print(f"[Worker-{worker_id}] 未能获取有效的 cookie 或 csrftoken")
+                automation_result = AutomationResult.from_status(AccountStatus.FAILED, message="未能获取有效的 cookie 或 csrftoken")
                 return automation_result
 
-            print(f"[Worker-{worker_id}] 未能获取有效的 cookie 或 csrftoken")
-            return AutomationResult.from_status(AccountStatus.FAILED, message="未能获取有效的 cookie 或 csrftoken")
-
-        except Exception as e:
-            print(f"[Worker-{worker_id}] 处理过程出错: {e}")
-            return AutomationResult.from_status(AccountStatus.FAILED, message=str(e))
-        finally:
-            if config.get("cache", {}).get("enabled", False):
-                try:
-                    _sync_new_cache_to_master(worker_id)  # 把新缓存文件同步回 master
-                except Exception as e:
-                    print(f"[Worker-{worker_id}] 同步缓存失败: {e}")
-            cleanup_subprocess_browser(browser)
-            stop_managed_proxy_runtime(proxy_runtime)
+            except Exception as e:
+                print(f"[Worker-{worker_id}] 处理过程出错: {e}")
+                automation_result = AutomationResult.from_status(AccountStatus.FAILED, message=str(e))
+                return automation_result
+            finally:
+                cleanup_subprocess_browser(browser)
+                stop_managed_proxy_runtime(proxy_runtime)
+                proxy_runtime = None
+    finally:
+        if pool_manager and lease_id:
+            pool_manager.release(lease_id, result_status=automation_result.status.value)

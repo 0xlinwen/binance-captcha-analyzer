@@ -201,6 +201,26 @@ class ConfigTests(unittest.TestCase):
             config = load_config(base_dir)
 
             self.assertEqual(config["register"]["submit_error_ack_max_attempts"], 3)
+            self.assertEqual(config["register"]["start_url"], "https://accounts.binance.com/zh-CN/register")
+            self.assertEqual(config["register"]["warmup_url"], "https://www.binance.com/zh-CN")
+            self.assertEqual(config["fingerprint"]["mode"], "native")
+
+    def test_load_config_rejects_invalid_fingerprint_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir, fingerprint={"mode": "random"})
+
+            with self.assertRaisesRegex(ValueError, "fingerprint.mode"):
+                load_config(base_dir)
+
+    def test_load_config_allows_empty_register_warmup_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir, register={"warmup_url": "  ", "submit_error_ack_max_attempts": 3})
+
+            config = load_config(base_dir)
+
+            self.assertEqual(config["register"]["warmup_url"], "")
 
     def test_load_config_rejects_invalid_register_submit_error_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
