@@ -259,6 +259,16 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             console_log(email_addr, "检测到风控错误", "warning")
             logger.warning(f"风控错误，页面内容: {body_text[:300]}")
 
+            # 频率限制表示当前账号/IP不能继续提交，立即交给外层换账号/代理。
+            if _has_frequency_limit_error(body_text):
+                console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                logger.error("平台频率限制 (208061)，不再点击弹窗或刷新重试")
+                duration = (datetime.now() - start_time).total_seconds()
+                log_summary(email_addr, False, duration, stage="register", iterations=iteration + 1, extra_info="rate_limited")
+                save_failure_log(logger, email_addr)
+                cleanup_listeners()
+                return AccountStatus.RATE_LIMITED
+
             # CloudFront 403 等 CDN 层拦截，直接失败不重试
             if risk.is_fatal:
                 console_log(email_addr, "CDN 403 拦截，IP 已被封禁，直接失败", "error")

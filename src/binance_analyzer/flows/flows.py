@@ -28,6 +28,7 @@ from .page_signals import (
     detect_login_url_state,
     detect_register_url_state,
     has_auth_failure_error,
+    has_frequency_limit_error,
     has_proxy_failure_error,
     is_browser_network_error_url,
     is_dashboard_url,
@@ -186,6 +187,10 @@ def _has_proxy_failure_error(text: str) -> bool:
 
 def _has_auth_failure_error(text: str) -> bool:
     return has_auth_failure_error(text)
+
+
+def _has_frequency_limit_error(text: str) -> bool:
+    return has_frequency_limit_error(text)
 
 
 def _get_body_text(page) -> str:

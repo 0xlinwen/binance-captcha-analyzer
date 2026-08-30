@@ -5,14 +5,19 @@
 - 目标：自动化 Binance 登录/注册，支持浏览器自动化、验证码和邮箱 MFA、代理、Cookie/CSRF 导出，以及 Linux Cloud -> Windows Worker 的远程任务闭环。
 - 当前进展：本地 CLI、Windows Worker、Linux Cloud 三个入口均可运行；本地和 Windows 共用 `config/automation.json`，Cloud 使用 SQLite 保存任务、日志和凭证。2026-08-26 已实测本机 Cloud -> Worker -> 登录 -> 回调闭环，MFA、Cookie 和 CSRF 已写入 Cloud 数据库。
 - 当前欠账：Creator Center 的真实 API 密钥提取在最近一次成功登录后的页面上尚未复测；它失败不会影响登录 Cookie 保存。未实现后台 Cookie 在线检查、会话二次验证、加密和按天删除 Cookie，均为明确未纳入范围的能力。
-- 最近验证：`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'` 于当前工作区通过 167 项；`PYTHONPATH=src python3 -m compileall -q src tests demo`、全部源模块实际导入和 `git diff --check` 通过。目录重构后以 AST 逐条检查 59 个源文件的 182 条项目内部 import 绑定，模块路径及被导入符号均可解析。
+- 最近验证：`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'` 于当前工作区通过 188 项；频率限制改造后的完整套件仍通过 188 项，`PYTHONPATH=src python3 -m compileall -q src tests` 和 `git diff --check` 通过。
 - 配置与运行文件：配置按 `automation.json`、`worker.json`、`cloud.json` 分角色拆分，无根目录 `config.json` 回退。相对运行路径均相对各自项目根目录：账号队列在 `data/accounts/`，本地结果在 `data/results/`，运行状态在 `data/runtime/`，调试证据在 `artifacts/debug/`。
 - 最近完成：Cloud 在任意工作目录启动时仍从项目根目录读取 `config/cloud.json` 和解析相对 SQLite 路径；Windows 回调 Outbox 位于 `data/runtime/callback_outbox.json`。任务组 Lark 告警和完成通知通过 SQLite 事件键去重，失败会在后续维护周期重试。
-- 文档：README 已描述 Cloud/Worker/SQLite/回调/Lark 闭环、三份配置的职责与回调方向、协议版本、Worker ID/并发、Linux 监听与反向代理前提，以及 Windows 部署路径模板；更新部署后必须让 Linux 与 Windows 位于同一 Git 提交、重启并健康检查后，才可重新进行真实闭环验收。
+- 文档：README 已描述 Cloud/Worker/SQLite/回调/Lark 闭环、三份配置的职责与回调方向、协议版本、Worker ID/并发、Linux 监听与反向代理前提，以及 Windows 部署路径模板；`docs/proxy-routing-strategy.md` 已明确 direct/static/rotating_single_ip/dynamic、独立 proxy.json、Linux 代理池权威、并发 lease/使用标记、动态 bootstrap->API->Gost->Chrome 真实链路、动态出口不去重和当前 Scheduler 断点；更新部署后必须让 Linux 与 Windows 位于同一 Git 提交、重启并健康检查后，才可重新进行真实闭环验收。
+- 代理配置：本地真实 `config/proxy.json` 已建立，包含 `direct/static/rotating_single_ip/dynamic`；固定池实际读取 `config/proxy_pool.txt`，每行一个完整 `scheme://username:password@host:port` 条目，Linux 启动时同步到 SQLite 内部默认单池，并按可配置 `cooldown_seconds` 进入冷却。动态 API/bootstrap 也由 `proxy.json` 统一提供；Worker capacity/active_slots 已纳入 Linux SQLite，派发前原子预约、回调/异常释放；真实代理配置文件被 `.gitignore` 排除，凭据不会进入 GitHub；示例仅用于初始化结构。`automation.json.proxy.profile` 是唯一 profile 选择入口。
 - 部署状态：Linux Cloud 已部署到 `/root/binance-captcha-analyzer`，由 `binance-cloud.service` 管理并监听 `0.0.0.0:8001`；公网健康接口已验证。Linux 专用 `config/cloud.json` 的回调地址为 `http://62.169.26.83:8001/api/worker/callback`，Linux 到 Windows Worker `43.165.177.157:8100` 的健康接口已验证，协议版本为 `1`。
 - 凭证时间字段已统一为 `credential_exported_at`，表示本次从浏览器 Context 导出 Cookie/CSRF 的 UTC 时间；不再读取或保存 Cookie 内部 `expires`，也不再使用 `cookie_expires_at`、`credential_updated_at`。当前测试阶段数据库无历史数据，SQLite 直接按新 schema 创建；该字段只用于凭证新旧回调覆盖判断，不代表 Cookie 过期时间。
-- 任务组连续失败停止阈值由 `config/cloud.json.consecutive_failure_limit` 配置；Linux 达到阈值后取消任务组未完成明细并发送一次 Lark 告警，Windows 通过取消状态停止后续账号。
-- 当前欠账：2026-08-27 真实登录任务 `29e84919-7de7-43fa-b923-a75ec95ea564` 因 Linux 与 Windows 均非当前代码版本，已在 Linux Cloud 取消（任务和明细均为 `cancelled`，没有成功/失败回调）。两端更新到当前代码并重启后，才可重新执行真实闭环验收。
+- 失败策略统一由 Linux `config/cloud.json.failure_policy` 管理：固定池单 IP 账号失败 3 次切换、连续 5 条失败 IP 停止；动态/直连按各自连续账号失败阈值停止。频率限制按账号立即终止并计入当前代理失败，不对同一账号重试。失败停止、代理池耗尽和动态代理初始化失败均发送 Lark 告警；Worker 只执行并回传结果。
+- 可观测性：Linux 提供 `GET /api/login-jobs/{id}/diagnostics`，一次返回任务/任务组、账号错误码、代理使用、租约、最近 50 条日志；`GET /api/workers` 返回每个 Worker 的 `active_items`。诊断中的代理认证信息会遮蔽，回调事件消息包含 status/error_code/proxy_entry/lease/dispatch 关联字段。
+- Worker 心跳：Windows Worker 启动后每 30 秒发送空闲心跳，执行账号时继续发送带 `current_job_item_id` 的心跳，避免 Cloud 将空闲但正常的 Worker 误标为 offline；本次修改尚未部署到 Windows。
+- 固定代理质量检测：`proxy_forwarder` 对 `mode=static` 默认关闭延迟质量检测，`config/proxy.json` 与示例已显式设置 `proxy_quality_check_enabled=false`；动态代理仍按自身配置执行质量检测。
+- 频率限制处理：登录/注册页面出现 `frequency limit` 或 `208061` 时立即返回 `RATE_LIMITED`，不点击“我已知晓”、不刷新、不在同一账号上重复提交；本地 CLI 对该状态立即结束当前账号，Cloud 将回调保存为终态 `failed`（保留 `error_code=rate_limited`），释放租约并结算代理失败，后续账号继续派发。本次修改尚未部署到 Windows/Linux。
+- 当前欠账：注册测试任务 `02f6d24d-ee75-4943-81d5-0864af6bb37d`、`a3d4183b-d72d-4819-90a6-4e7ebe83ae88` 与 `6f5173b9-55b5-49bc-8d3d-de4dc5029139` 均已正常派发并收到 Windows Worker 回调，但结果为 `failed`，旧 Worker 未提供具体错误信息；本地已修复固定状态说明并通过 169 项测试，仍需部署新 Worker 后以新任务确认 Cloud 能写入 `error_code/error_message`。注册任务 `cfcfb588-f060-4767-aeca-5a95c1c830c5` 已最终 `completed/success`。20 账号注册任务组 `2843da90-a269-4237-9b08-ad5f224e3689`（任务 `c83c95d9-bc67-42a4-a522-4e7e72626313`）已启动，最近状态成功 2、失败 4、其余运行中；Lark Webhook 已配置，通知尚未触发。登录任务 `55c191e1-1b0c-4b57-9c2d-3fb685a864ab` 已完成数据库 schema 迁移、Cloud 重启和回调补投，最终 `completed/success`；登录任务 `311445a6-14a7-4e57-af2b-d126ad21071b` 也已最终 `completed/success`，凭证已写入 Cloud。服务器 `/root/binance-captcha-analyzer` 的 `src` 文件已与本地 `433fd94` 逐项 SHA-256 一致，服务器虚拟环境已补装 `portalocker 3.2.0`。
 
 ## 架构约定
 
@@ -51,8 +56,8 @@ python main.py --refresh-cache
 ## 重要技术决策
 
 - 流程状态使用 `AccountStatus` 统一建模；编排完成后统一返回 `AutomationResult`，其中包含状态、错误和可回调的 Cookie/CSRF 凭证。
-- `rate_limited` 代表 IP/代理会话失败，应允许入口层重建代理重试；最终仍失败时再计入风控限制。
-- `proxy_failed` / `rate_limited` 属于环境或代理会话问题，不能写入失败账号文件，也不能从账号队列移除。
+- `rate_limited`（页面频率限制）代表当前账号在当前 IP 上立即终止：不在入口层重试同一账号，但由 Cloud 计入代理失败并继续后续账号；本地 CLI 保留账号队列供后续人工或新任务处理。
+- `proxy_failed` 属于代理会话问题，入口层可重建代理重试，且不能写入失败账号文件或从账号队列移除。
 - 页面登录态判断必须解析 URL 的 hostname/path，不使用整串包含判断，避免 `return_to=/my/dashboard` 这类 query 参数误判。
 - 账号密码在本项目中属于账号复用所需数据，不做脱敏清理。`registered_accounts.json`、成功/失败账号队列文件均保留完整凭据。
 - 配置错误和显式启用的核心依赖缺失必须 fail-fast。已移除的兜底包括：代理预热失败后直连、未知 mode 自动当 login、gost 配置缺失后静默直连、找不到邮箱输入框时填写第一个文本框、全局弹窗无法点击时用 JS 强行隐藏。

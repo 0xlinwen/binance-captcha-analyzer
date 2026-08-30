@@ -143,6 +143,22 @@ class CloudDatabaseTests(unittest.TestCase):
             self.assertEqual(entry["status"], "cooling")
             self.assertTrue(entry["cooldown_until"])
 
+    def test_rate_limited_callback_is_terminal_failed_and_not_requeued(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "limited@example.com", "password": "pw"}], {"mode": "rotating_single_ip"})
+            db.configure_proxy_pool("default", ["socks5://one:1000"])
+            payload = db.rotating_worker_payload(job["id"], "worker", 60)
+            account = payload["accounts"][0]
+            db.save_callback({"job_id": job["id"], "job_item_id": account["job_item_id"], "account_id": account["account_id"],
+                              "worker_id": "worker", "status": "rate_limited", "error_code": "rate_limited",
+                              "error_message": "频率限制", "lease_id": account["lease_id"], "proxy_entry_id": account["proxy_entry_id"]})
+            item = db.get_job(job["id"])["items"][0]
+            self.assertEqual(item["status"], "failed")
+            self.assertEqual(item["retry_count"], 0)
+            self.assertEqual(db.get_job(job["id"])["status"], "completed")
+            self.assertEqual(db._one("SELECT state FROM proxy_leases WHERE lease_id=?", (account["lease_id"],))["state"], "released")
+
     def test_task_group_cancels_pending_items_after_failure_threshold(self):
         with TemporaryDirectory() as temp:
             db = Database(Path(temp) / "state.db")
