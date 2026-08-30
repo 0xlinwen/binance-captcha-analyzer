@@ -251,7 +251,10 @@ def execute(payload: dict) -> None:
                 callback_status = "failed"
                 callback_error_code = "credentials_missing"
             else:
-                callback_status = status.value if status.value in {"success", "failed", "proxy_failed", "rate_limited"} else "failed"
+                callback_status = status.value if status.value in {
+                    "success", "failed", "proxy_failed", "rate_limited",
+                    "already_registered", "need_register",
+                } else "failed"
                 callback_error_code = None if callback_status == "success" else (getattr(automation_result, "error_code", None) or status.value)
             result = {"job_id": job_id, "job_item_id": account["job_item_id"], "account_id": account["account_id"], "worker_id": worker_id,
                       **lease_metadata, "status": callback_status,

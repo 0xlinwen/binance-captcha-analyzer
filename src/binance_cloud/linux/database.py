@@ -35,7 +35,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
   password TEXT NOT NULL, client_id TEXT, refresh_token TEXT,
-  status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  status TEXT NOT NULL DEFAULT 'active', registration_state TEXT NOT NULL DEFAULT 'unknown',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS login_jobs (
   id TEXT PRIMARY KEY, status TEXT NOT NULL, task_mode TEXT NOT NULL DEFAULT 'login', idempotency_key TEXT UNIQUE, proxy_mode TEXT NOT NULL DEFAULT 'direct',
@@ -130,6 +131,9 @@ class Database:
 
     def _migrate_columns(self) -> None:
         job_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(login_jobs)")}
+        account_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(accounts)")}
+        if "registration_state" not in account_columns:
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN registration_state TEXT NOT NULL DEFAULT 'unknown'")
         if "task_mode" not in job_columns:
             self.conn.execute("ALTER TABLE login_jobs ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'login'")
         if "task_group_id" not in job_columns:
@@ -423,16 +427,30 @@ class Database:
                 row = self._one("SELECT id FROM accounts WHERE email=?", (account["email"],))
                 if not row:
                     raise ValueError(f"重派账号不存在: {account['email']}")
+                account_state = self._one("SELECT registration_state FROM accounts WHERE id=?", (row["id"],))["registration_state"]
+                # 已知业务状态在创建时直接终止，绝不再把账号派给错误场景。
                 item_status = "queued"
+                item_error_code = None
+                item_error_message = None
+                if task_mode == "register" and account_state == "registered":
+                    item_status = "already_registered"
+                    item_error_code = "already_registered"
+                    item_error_message = "账号已知已注册，跳过注册任务"
+                elif task_mode == "login" and account_state == "unregistered":
+                    item_status = "need_register"
+                    item_error_code = "need_register"
+                    item_error_message = "账号已知未注册，跳过登录任务"
                 if mode == "fixed" and index >= limit:
                     item_status = "proxy_quota_exceeded"
                     quota_exceeded += 1
                 self.conn.execute(
-                    """INSERT INTO login_job_items(job_id,account_id,status,proxy_address,
+                    """INSERT INTO login_job_items(job_id,account_id,status,proxy_address,error_code,error_message,completed_at,
                          account_email_snapshot,account_password_snapshot,
                          account_client_id_snapshot,account_refresh_token_snapshot,retry_of_job_item_id)
-                       VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (job_id, row["id"], item_status, address, account["email"], account["password"],
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (job_id, row["id"], item_status, address, item_error_code, item_error_message,
+                     now if item_status in {"already_registered", "need_register"} else None,
+                     account["email"], account["password"],
                      account.get("client_id"), account.get("refresh_token"), account.get("retry_of_job_item_id")),
                 )
             if quota_exceeded:
@@ -442,6 +460,39 @@ class Database:
             if task_group_id:
                 self.conn.execute("UPDATE task_groups SET total_count=total_count+? WHERE id=?", (len(accounts), task_group_id))
         return self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
+
+    def route_need_register_to_child_job(self, source_item_id: int) -> dict | None:
+        """登录发现未注册时，以原账号快照在同一任务组创建一个注册子任务。"""
+        with self._lock, self.conn:
+            row = self._one(
+                """SELECT i.*, j.task_mode, j.task_group_id, j.proxy_mode, j.proxy_profile,
+                          j.proxy_address, j.max_accounts_per_proxy,
+                          a.email AS account_email, a.password AS account_password,
+                          a.client_id AS account_client_id, a.refresh_token AS account_refresh_token
+                     FROM login_job_items i JOIN login_jobs j ON j.id=i.job_id
+                     JOIN accounts a ON a.id=i.account_id WHERE i.id=?""",
+                (source_item_id,),
+            )
+            if not row or row["task_mode"] != "login" or row["status"] != "need_register":
+                return None
+            existing = self._one(
+                "SELECT id FROM login_job_items WHERE retry_of_job_item_id=? AND job_id IN (SELECT id FROM login_jobs WHERE task_mode='register')",
+                (source_item_id,),
+            )
+            if existing:
+                return None
+            account = {
+                "email": row["account_email_snapshot"] or row["account_email"],
+                "password": row["account_password_snapshot"] or row["account_password"],
+                "client_id": row["account_client_id_snapshot"] or row["account_client_id"],
+                "refresh_token": row["account_refresh_token_snapshot"] or row["account_refresh_token"],
+                "retry_of_job_item_id": source_item_id,
+            }
+            proxy = {"mode": row["proxy_mode"], "proxy_profile": row["proxy_profile"],
+                     "address": row["proxy_address"], "max_accounts_per_job": row["max_accounts_per_proxy"]}
+            job = self.create_job([account], proxy, task_mode="register", task_group_id=row["task_group_id"], update_accounts=False)
+            self.record_log("need_register_routed", f"register_job={job['id']}", job_id=row["job_id"], job_item_id=source_item_id, account_id=row["account_id"], level="INFO")
+            return job
 
     def create_relogin_job(self, account_id: int, proxy: dict | None = None) -> dict:
         account = self._one("SELECT email,password,client_id,refresh_token FROM accounts WHERE id=?", (account_id,))
@@ -525,7 +576,7 @@ class Database:
 
     def refresh_task_group(self, group_id: str) -> dict | None:
         with self._lock, self.conn:
-            counts = self.conn.execute("""SELECT COUNT(*), SUM(i.status='success'), SUM(i.status IN ('failed','proxy_quota_exceeded')), SUM(i.status='cancelled'),
+            counts = self.conn.execute("""SELECT COUNT(*), SUM(i.status IN ('success','already_registered','need_register')), SUM(i.status IN ('failed','proxy_quota_exceeded')), SUM(i.status='cancelled'),
                 SUM(i.status IN ('queued','running','retryable')) FROM login_job_items i JOIN login_jobs j ON j.id=i.job_id WHERE j.task_group_id=?""", (group_id,)).fetchone()
             total, success, failed, cancelled, pending = counts[0], counts[1] or 0, counts[2] or 0, counts[3] or 0, counts[4] or 0
             status = "completed" if total and pending == 0 else "running"
@@ -655,6 +706,7 @@ class Database:
         if not job or job["proxy_mode"] != "rotating_single_ip":
             return self.worker_payload(job_id) if job else None
         with self._lock, self.conn:
+            self._skip_known_incompatible_items(job_id, job["task_mode"])
             item = self._one("SELECT id FROM login_job_items WHERE job_id=? AND status IN ('queued','retryable') ORDER BY id LIMIT 1", (job_id,))
             if not item:
                 return None
@@ -674,6 +726,10 @@ class Database:
     def next_worker_payload(self, job_id: str, worker_id: str, lease_seconds: int) -> dict | None:
         """领取普通模式的一个账号，避免批量 payload 与 Worker 槽位失配。"""
         with self._lock, self.conn:
+            job = self._one("SELECT task_mode FROM login_jobs WHERE id=?", (job_id,))
+            if not job:
+                raise ValueError("任务不存在")
+            self._skip_known_incompatible_items(job_id, job["task_mode"])
             item = self._one("SELECT id FROM login_job_items WHERE job_id=? AND status IN ('queued','retryable') ORDER BY id LIMIT 1", (job_id,))
             if not item:
                 return None
@@ -684,6 +740,32 @@ class Database:
             payload["accounts"] = [a for a in payload["accounts"] if a["job_item_id"] == item["id"]]
             self.record_log("item_claimed", f"worker={worker_id} item={item['id']}", job_id=job_id, job_item_id=item["id"], worker_id=worker_id)
             return payload if payload["accounts"] else None
+
+    def _skip_known_incompatible_items(self, job_id: str, task_mode: str) -> int:
+        """派发前复核账号注册状态，避免跨任务状态更新后仍执行错误场景。"""
+        now = utc_now()
+        if task_mode == "register":
+            updated = self.conn.execute(
+                """UPDATE login_job_items SET status='already_registered',error_code='already_registered',
+                       error_message='账号已知已注册，跳过注册任务',completed_at=?,lease_expires_at=NULL
+                     WHERE job_id=? AND status IN ('queued','retryable')
+                       AND account_id IN (SELECT id FROM accounts WHERE registration_state='registered')""",
+                (now, job_id),
+            ).rowcount
+        elif task_mode == "login":
+            updated = self.conn.execute(
+                """UPDATE login_job_items SET status='need_register',error_code='need_register',
+                       error_message='账号已知未注册，跳过登录任务',completed_at=?,lease_expires_at=NULL
+                     WHERE job_id=? AND status IN ('queued','retryable')
+                       AND account_id IN (SELECT id FROM accounts WHERE registration_state='unregistered')""",
+                (now, job_id),
+            ).rowcount
+        else:
+            raise ValueError("task_mode 只支持 login/register")
+        if updated:
+            self.record_log("items_skipped_by_account_state", f"mode={task_mode} count={updated}", job_id=job_id, level="INFO")
+            self._refresh_job_state(job_id, now)
+        return updated
 
     def mark_items_running(self, job_id: str, worker_id: str, lease_seconds: int) -> None:
         now = utc_now()
@@ -707,7 +789,7 @@ class Database:
         if current_job and current_job["status"] == "proxy_pool_exhausted":
             return
         counts = self.conn.execute(
-            "SELECT SUM(status='success'), SUM(status IN ('failed','proxy_quota_exceeded')), SUM(status='cancelled'), COUNT(*) "
+            "SELECT SUM(status IN ('success','already_registered','need_register')), SUM(status IN ('failed','proxy_quota_exceeded')), SUM(status='cancelled'), COUNT(*) "
             "FROM login_job_items WHERE job_id=?", (job_id,)
         ).fetchone()
         success, failed, cancelled, total = counts[0] or 0, counts[1] or 0, counts[2] or 0, counts[3]
@@ -877,7 +959,7 @@ class Database:
             if item["status"] in {"success", "failed", "cancelled", "proxy_quota_exceeded"}:
                 return item
             had_lease = bool(item.get("lease_id"))
-            if status not in {"success", "failed", "retryable", "proxy_failed", "rate_limited"}:
+            if status not in {"success", "failed", "retryable", "proxy_failed", "rate_limited", "already_registered", "need_register"}:
                 raise ValueError(f"不支持的回调状态: {status}")
             if status == "success" and not payload.get("cookie"):
                 raise ValueError("成功回调必须包含 cookie")
@@ -891,6 +973,7 @@ class Database:
             # frequency limit/208061 已明确表示当前账号终止；保存为 failed
             # 以完成任务统计，同时保留 error_code=rate_limited 并结算代理失败。
             # 普通 proxy_failed 继续支持换代理重试。
+            business_terminal = status in {"already_registered", "need_register"}
             retryable = status in {"retryable", "proxy_failed"}
             if retryable:
                 retry_count = item["retry_count"] + 1
@@ -908,9 +991,15 @@ class Database:
                     "UPDATE login_job_items SET status=?, error_code=?, error_message=?, completed_at=?, lease_expires_at=NULL WHERE id=?",
                     (stored_status, payload.get("error_code"), payload.get("error_message"), now, item_id),
                 )
+            if status == "already_registered":
+                self.conn.execute("UPDATE accounts SET registration_state='registered',updated_at=? WHERE id=?", (now, item["account_id"]))
+            elif status == "need_register":
+                self.conn.execute("UPDATE accounts SET registration_state='unregistered',updated_at=? WHERE id=?", (now, item["account_id"]))
+            elif status == "success":
+                self.conn.execute("UPDATE accounts SET registration_state='registered',updated_at=? WHERE id=?", (now, item["account_id"]))
             if payload.get("lease_id"):
                 # 只有账号最终结束时才结算固定池失败；中间 retryable 不污染连续失败计数。
-                lease_result = status if (status == "rate_limited" or (retryable and stored_status == "failed")) else (stored_status if retryable else status)
+                lease_result = "success" if business_terminal else (status if (status == "rate_limited" or (retryable and stored_status == "failed")) else (stored_status if retryable else status))
                 self.release_proxy_lease(payload["lease_id"], result_status=lease_result, release_reason="worker_callback")
             elif not had_lease and payload.get("worker_id"):
                 self.release_worker_slot(payload["worker_id"])
@@ -923,13 +1012,13 @@ class Database:
                     (item["account_id"], payload["cookie"], payload.get("csrftoken"), credential_exported_at, now, now))
             # 动态/直连模式按账号最终结果维护任务组连续失败；固定池使用 IP 链单独统计。
             final_status = stored_status if retryable or status == "rate_limited" else status
-            if final_status in {"success", "already_registered"}:
+            if final_status in {"success", "already_registered", "need_register"}:
                 self.conn.execute("UPDATE task_groups SET consecutive_failures=0 WHERE id=(SELECT task_group_id FROM login_jobs WHERE id=?)", (item["job_id"],))
             elif final_status == "failed":
                 self.conn.execute("UPDATE task_groups SET consecutive_failures=consecutive_failures+1 WHERE id=(SELECT task_group_id FROM login_jobs WHERE id=?)", (item["job_id"],))
             if item.get("proxy_address"):
                 self.conn.execute("""UPDATE login_job_proxy_usage SET success_count=success_count+?,failed_count=failed_count+?,last_assigned_at=? WHERE job_id=? AND proxy_address=?""",
-                    (1 if status == "success" else 0, 0 if status == "success" else 1, now, item["job_id"], item["proxy_address"]))
+                    (1 if status in {"success", "already_registered", "need_register"} else 0, 0 if status in {"success", "already_registered", "need_register"} else 1, now, item["job_id"], item["proxy_address"]))
             details = " ".join(filter(None, (
                 f"status={status}",
                 f"error_code={payload.get('error_code')}" if payload.get("error_code") else None,
