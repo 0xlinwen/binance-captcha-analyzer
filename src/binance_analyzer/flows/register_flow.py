@@ -224,6 +224,16 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
         url = page.url
         url_pattern = detect_register_url_state(url).value
 
+        body_now = _get_body_text(page)
+        if _has_frequency_limit_error(body_now):
+            console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+            logger.error("平台频率限制 (208061)，立即停止当前账号")
+            duration = (datetime.now() - start_time).total_seconds()
+            log_summary(email_addr, False, duration, stage="register", iterations=iteration + 1, extra_info="rate_limited")
+            save_failure_log(logger, email_addr)
+            cleanup_listeners()
+            return AccountStatus.RATE_LIMITED
+
         # 检查 URL 状态是否变化
         if url_pattern == last_url_pattern:
             url_retry_counts[url_pattern] = url_retry_counts.get(url_pattern, 0) + 1
@@ -375,7 +385,7 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
         # 检测"已存在账户"弹窗（账号已注册）
         try:
             body_text = page.inner_text("body")
-            if "已经存在账户" in body_text or "已存在账户" in body_text or "account already exists" in body_text.lower():
+            if _has_already_registered_error(body_text):
                 # 尝试关闭弹窗
                 close_buttons = [
                     "button:has-text('关闭')",
@@ -648,11 +658,22 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             # 等待页面响应（URL变化 或 验证码弹窗）
             response_type, url = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
             logger.info(f"注册页点击继续后响应类型: {response_type}")
+            if _has_frequency_limit_error(_get_body_text(page)):
+                console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                logger.error("平台频率限制 (208061)，注册提交后立即停止")
+                cleanup_listeners()
+                return AccountStatus.RATE_LIMITED
             if response_type == "url_changed":
                 logger.info(f"注册页提交后已进入新状态: {url}")
                 continue
 
-            if _has_register_submit_ack_error(_get_body_text(page)):
+            response_body = _get_body_text(page)
+            if _has_frequency_limit_error(response_body):
+                console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                logger.error("平台频率限制 (208061)，提交响应后立即停止")
+                cleanup_listeners()
+                return AccountStatus.RATE_LIMITED
+            if _has_register_submit_ack_error(response_body):
                 if _retry_register_submit_ack_error(page, email_addr, logger, submit_error_ack_max_attempts):
                     continue
                 console_log(email_addr, "注册提交错误连续确认后仍未进入下一步", "error")
@@ -704,7 +725,13 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
                         if response_type2 == "url_changed":
                             logger.info(f"重新勾选协议后已进入新状态: {url}")
                             continue
-                        if _has_register_submit_ack_error(_get_body_text(page)):
+                        response_body = _get_body_text(page)
+                        if _has_frequency_limit_error(response_body):
+                            console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                            logger.error("平台频率限制 (208061)，验证码后立即停止")
+                            cleanup_listeners()
+                            return AccountStatus.RATE_LIMITED
+                        if _has_register_submit_ack_error(response_body):
                             if _retry_register_submit_ack_error(
                                 page,
                                 email_addr,

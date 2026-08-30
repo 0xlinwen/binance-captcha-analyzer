@@ -284,9 +284,11 @@ curl http://127.0.0.1:8100/health
 
 失败回调会包含 `error_code` 和 `error_message`：状态机返回明确状态但没有额外异常时使用该状态的固定说明；浏览器、验证码、邮箱或凭证导出异常会保留具体异常消息。Cloud 会把这两个字段写入任务明细和执行日志，便于不登录服务器也能定位失败类别。历史任务已经写入的空错误字段不会被补写，修复仅对更新后的 Worker 新任务生效。
 
+失败任务可通过 `GET /api/login-jobs/{id}/failed-items` 查询最终失败账号的任务明细、邮箱和错误信息；响应不会包含密码、邮箱 OAuth 凭证或未脱敏代理 URI。使用 `POST /api/login-jobs/{id}/retry-failed` 可按 `job_item_ids` 选择性重派，省略该字段则重派该任务的全部最终失败项。重派任务默认继承原任务的登录/注册模式和代理配置，也可在请求中提供 `proxy` 覆盖；Linux 只从任务创建时保存的账号快照读取凭据，后续更新同邮箱账号资料不会改变历史任务的重派凭据。每个新任务项会记录其来源任务项 ID。
+
 当前默认不启用 API/Worker 鉴权；设置 `BINANCE_WORKER_TOKEN` 或 `BINANCE_CALLBACK_TOKEN` 后分别启用 Worker 请求和回调校验。Cookie 仅在登录成功时保存，不执行自动在线检查或状态更新。创建任务前必须在 `config/cloud.json` 配置 `windows_worker_url` 与 `callback_url`；Worker 心跳会续租当前账号，取消任务后停止后续账号执行。
 
-Windows 在回调前会把结果写入 `data/runtime/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_exported_at`（本次从浏览器导出的时间），Linux 只接受较新的凭证，避免重新登录后的旧回调迟到并覆盖新 Cookie。该字段不是 Cookie 过期时间；当前系统不提供后台 Cookie 在线有效性检查。
+Windows Worker 会每 30 秒向 Cloud 发送一次空闲心跳；执行账号时额外发送带 `current_job_item_id` 的心跳。这样 Worker 空闲时也不会被 Cloud 误标为 offline。回调前会把结果写入 `data/runtime/callback_outbox.json`。Linux 短暂不可达时，该文件会按退避间隔持续重试，Worker 重启后仍会恢复投递；回调成功才删除对应条目。每个凭证附带 `credential_exported_at`（本次从浏览器导出的时间），Linux 只接受较新的凭证，避免重新登录后的旧回调迟到并覆盖新 Cookie。该字段不是 Cookie 过期时间；当前系统不提供后台 Cookie 在线有效性检查。
 
 附带部署模板：`deploy/linux/binance-cloud.service` 和 `deploy/windows/start_worker.ps1`。Linux 后台会自动回收过期任务租约、标记离线 Worker、重新派发可重试任务。数据库支持 WAL、备份接口 `/api/database/backup`、任务取消接口 `/api/login-jobs/{id}/cancel` 和日志清理接口 `/api/logs?days=30`。
 

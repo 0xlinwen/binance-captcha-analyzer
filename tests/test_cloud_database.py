@@ -159,6 +159,51 @@ class CloudDatabaseTests(unittest.TestCase):
             self.assertEqual(db.get_job(job["id"])["status"], "completed")
             self.assertEqual(db._one("SELECT state FROM proxy_leases WHERE lease_id=?", (account["lease_id"],))["state"], "released")
 
+    def test_failed_items_can_be_retried_from_original_credential_snapshot(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job(
+                [{"email": "retry@example.com", "password": "original-password"}],
+                {"mode": "dynamic", "proxy_profile": "dynamic"},
+                task_mode="register",
+            )
+            item = db.get_job(job["id"])["items"][0]
+            db.mark_items_running(job["id"], "worker", 60)
+            db.save_callback({
+                "job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                "worker_id": "worker", "status": "failed", "error_code": "register_failed",
+            })
+            db.save_account("retry@example.com", "newer-password")
+
+            failed = db.failed_items(job["id"])
+            self.assertEqual([row["job_item_id"] for row in failed], [item["id"]])
+            self.assertNotIn("password", failed[0])
+            self.assertNotIn("original-password", str(failed))
+
+            retry_job = db.create_failed_items_retry_job(job["id"])
+            self.assertEqual(retry_job["task_mode"], "register")
+            self.assertEqual(retry_job["proxy_mode"], "dynamic")
+            retry_item = db.get_job(retry_job["id"])["items"][0]
+            self.assertEqual(retry_item["retry_of_job_item_id"], item["id"])
+            self.assertNotIn("account_password_snapshot", retry_item)
+            payload = db.worker_payload(retry_job["id"])
+            self.assertEqual(payload["accounts"][0]["password"], "original-password")
+
+    def test_failed_items_retry_rejects_nonfailed_or_duplicate_items(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            job = db.create_job([{"email": "retry-select@example.com", "password": "pw"}])
+            item = db.get_job(job["id"])["items"][0]
+            with self.assertRaisesRegex(ValueError, "最终失败项"):
+                db.create_failed_items_retry_job(job["id"], [item["id"]])
+            db.mark_items_running(job["id"], "worker", 60)
+            db.save_callback({
+                "job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                "worker_id": "worker", "status": "failed",
+            })
+            with self.assertRaisesRegex(ValueError, "不可重复"):
+                db.create_failed_items_retry_job(job["id"], [item["id"], item["id"]])
+
     def test_task_group_cancels_pending_items_after_failure_threshold(self):
         with TemporaryDirectory() as temp:
             db = Database(Path(temp) / "state.db")
