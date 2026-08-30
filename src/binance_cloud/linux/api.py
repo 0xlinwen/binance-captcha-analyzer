@@ -394,7 +394,7 @@ def _dispatch_worker(payload: dict) -> None:
             capacity = int(worker_health.get("worker_max_workers", 1))
             state = db.proxy_pool_state(DEFAULT_PROXY_POOL_ID)
             node = db._one("SELECT active_slots,capacity FROM worker_nodes WHERE id=?", (worker_id,)) if worker_id else None
-            available_slots = max(1, capacity - int((node or {}).get("active_slots", 0)))
+            available_slots = max(0, capacity - int((node or {}).get("active_slots", 0)))
             slots = available_slots if state["allow_parallel"] else 1
             for _ in range(max(0, slots - 1)):
                 extra = db.rotating_worker_payload(payload["job_id"], worker_id or "dispatching", LEASE_SECONDS, pool_id=DEFAULT_PROXY_POOL_ID)
@@ -408,11 +408,14 @@ def _dispatch_worker(payload: dict) -> None:
             try:
                 account = (item_payload.get("accounts") or [{}])[0]
                 if worker_id:
+                    # 先原子预约全局槽位；容量已满的 payload 回队列，不能占用
+                    # 代理租约，更不能作为 Worker 派发失败计入账号/IP。
+                    if not db.reserve_worker_slot(worker_id, account.get("job_item_id")):
+                        db.defer_dispatch_for_capacity(account.get("job_item_id"), account.get("lease_id"))
+                        continue
                     for acc in item_payload.get("accounts") or []:
                         if acc.get("lease_id"):
                             db.bind_lease_worker(acc["lease_id"], worker_id)
-                    if not db.reserve_worker_slot(worker_id):
-                        raise RuntimeError("Worker 没有可用执行槽位")
                 response = requests.post(f"{WINDOWS_WORKER_URL.rstrip('/')}/worker/execute-login", json=item_payload, headers=headers, timeout=30)
                 response.raise_for_status()
             except Exception as exc:
