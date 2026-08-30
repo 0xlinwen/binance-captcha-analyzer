@@ -219,6 +219,31 @@ def _normalize_register_config(config: dict) -> None:
         register_config.get("submit_error_ack_max_attempts", 3),
         key="register.submit_error_ack_max_attempts",
     )
+    if "start_url" not in register_config or register_config.get("start_url") in (None, ""):
+        register_config["start_url"] = "https://accounts.binance.com/zh-CN/register"
+    else:
+        _require_text(register_config, "start_url")
+    if "warmup_url" not in register_config:
+        register_config["warmup_url"] = "https://www.binance.com/zh-CN"
+    elif register_config["warmup_url"] is None:
+        register_config["warmup_url"] = ""
+    elif not isinstance(register_config["warmup_url"], str):
+        raise ValueError("配置 register.warmup_url 必须是字符串")
+    else:
+        register_config["warmup_url"] = register_config["warmup_url"].strip()
+
+
+def _normalize_fingerprint_config(config: dict) -> None:
+    fingerprint = config.get("fingerprint")
+    if fingerprint is None:
+        fingerprint = {}
+        config["fingerprint"] = fingerprint
+    if not isinstance(fingerprint, dict):
+        raise ValueError("配置 fingerprint 必须是对象")
+    mode = str(fingerprint.get("mode") or "native").strip().lower()
+    if mode not in {"native", "spoofed"}:
+        raise ValueError("配置 fingerprint.mode 只支持 native/spoofed")
+    fingerprint["mode"] = mode
 
 
 def _normalize_creator_api_config(config: dict) -> None:
@@ -258,6 +283,7 @@ def load_config(base_dir: Path, filename: str = "config/automation.json") -> dic
     login_config = _require_dict(config, "login")
     _require_text(login_config, "start_url")
     _normalize_register_config(config)
+    _normalize_fingerprint_config(config)
     _normalize_creator_api_config(config)
 
     _normalize_captcha_config(config)

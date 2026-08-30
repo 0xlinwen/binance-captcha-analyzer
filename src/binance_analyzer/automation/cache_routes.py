@@ -21,7 +21,11 @@ def handle_cache_route(route, request):
         cached = cache_manager.get_cached(url, resource_type)
         if cached:
             mark_cached_url(url)
-            route.fulfill(status=200, headers=cached["headers"], body=cached["body"])
+            route.fulfill(
+                status=200,
+                headers=cache_manager.sanitize_cached_headers(cached.get("headers") or {}),
+                body=cached["body"],
+            )
             return
     route.continue_()
 

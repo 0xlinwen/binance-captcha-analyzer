@@ -12,6 +12,8 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from ..fingerprint import is_native_fingerprint
+
 # 主流程使用本机 Google Chrome；缺失时 fail-fast，禁止静默回退到 Playwright Chromium
 _LOCAL_CHROME_PATH: str | None = None
 
@@ -578,19 +580,107 @@ def get_launch_args(screen_width: int, screen_height: int) -> list:
     ]
 
 
+def _normalize_proxy_server(proxy_settings) -> str | None:
+    if not proxy_settings:
+        return None
+    proxy_server = str(proxy_settings.get("server") or "").strip()
+    if not proxy_server:
+        return None
+    parsed_proxy = urllib.parse.urlsplit(proxy_server)
+    if not parsed_proxy.hostname or not parsed_proxy.port:
+        return proxy_server
+    return urllib.parse.urlunsplit(
+        (
+            parsed_proxy.scheme or "http",
+            f"{parsed_proxy.hostname}:{parsed_proxy.port}",
+            parsed_proxy.path,
+            parsed_proxy.query,
+            parsed_proxy.fragment,
+        )
+    )
+
+
+def build_chrome_launch_command(
+    chrome_path: str,
+    port: int,
+    user_data_dir: str,
+    fingerprint: dict,
+    *,
+    headless: bool,
+    proxy_server: str | None = None,
+    viewport_height: int = 0,
+) -> list[str]:
+    """构建本机 Chrome 启动参数。native 模式不伪造窗口尺寸和色域。"""
+    cmd = [
+        chrome_path,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    if not is_native_fingerprint(fingerprint):
+        cmd.extend(
+            [
+                f"--window-size={fingerprint['screen_width']},{viewport_height}",
+                "--force-color-profile=srgb",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-ipc-flooding-protection",
+            ]
+        )
+    if headless:
+        cmd.append("--headless=new")
+    if proxy_server:
+        cmd.append(f"--proxy-server={proxy_server}")
+    cmd.append("about:blank")
+    return cmd
+
+
+def _apply_spoofed_emulation(cdp, fingerprint: dict, viewport_height: int) -> None:
+    cdp.send(
+        "Emulation.setUserAgentOverride",
+        {
+            "userAgent": fingerprint["user_agent"],
+            "platform": fingerprint["platform"],
+            "acceptLanguage": ",".join(fingerprint["languages"]),
+        },
+    )
+    cdp.send(
+        "Emulation.setTimezoneOverride",
+        {
+            "timezoneId": fingerprint["timezone_id"],
+        },
+    )
+    cdp.send(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": fingerprint["screen_width"],
+            "height": viewport_height,
+            "deviceScaleFactor": fingerprint["device_pixel_ratio"],
+            "mobile": False,
+            "screenWidth": fingerprint["screen_width"],
+            "screenHeight": fingerprint["screen_height"],
+        },
+    )
+
+
 def build_stealth_context(p, fingerprint: dict, proxy_settings, headless: bool):
     """
-    创建 browser + context + 注入脚本。
+    创建 browser + context。
     统一用 subprocess 启动本机 Google Chrome（不带 --enable-automation）。
+    native 模式不注入伪造脚本，避免和真实 Chrome 身份打架。
     """
-    viewport_height = fingerprint['screen_height'] - 80
+    viewport_height = 0
+    if not is_native_fingerprint(fingerprint):
+        viewport_height = fingerprint["screen_height"] - 80
     browser, context, page = build_stealth_context_subprocess(
         p, fingerprint, proxy_settings, headless, viewport_height
     )
 
-    # 注入反检测脚本
-    init_script = build_stealth_init_script(fingerprint)
-    context.add_init_script(init_script)
+    if not is_native_fingerprint(fingerprint):
+        context.add_init_script(build_stealth_init_script(fingerprint))
 
     return browser, context, page
 
@@ -603,42 +693,16 @@ def build_stealth_context_subprocess(p, fingerprint, proxy_settings, headless, v
     user_data_dir = tempfile.mkdtemp(prefix='pw_chrome_')
     chrome_process = None
     browser = None
-    proxy_server = None
-    if proxy_settings:
-        proxy_server = str(proxy_settings.get("server") or "").strip()
-        if proxy_server:
-            parsed_proxy = urllib.parse.urlsplit(proxy_server)
-            if parsed_proxy.hostname and parsed_proxy.port:
-                proxy_server = urllib.parse.urlunsplit(
-                    (
-                        parsed_proxy.scheme or "http",
-                        f"{parsed_proxy.hostname}:{parsed_proxy.port}",
-                        parsed_proxy.path,
-                        parsed_proxy.query,
-                        parsed_proxy.fragment,
-                    )
-                )
-
-    # 最小化启动参数，不加 --enable-automation
-    cmd = [
+    proxy_server = _normalize_proxy_server(proxy_settings)
+    cmd = build_chrome_launch_command(
         chrome_path,
-        f'--remote-debugging-port={port}',
-        f'--user-data-dir={user_data_dir}',
-        '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--no-default-browser-check',
-        f'--window-size={fingerprint["screen_width"]},{viewport_height}',
-        '--force-color-profile=srgb',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-ipc-flooding-protection',
-        'about:blank',
-    ]
-    if headless:
-        cmd.append('--headless=new')
-    if proxy_server:
-        cmd.append(f'--proxy-server={proxy_server}')
+        port,
+        user_data_dir,
+        fingerprint,
+        headless=headless,
+        proxy_server=proxy_server,
+        viewport_height=viewport_height,
+    )
 
     try:
         # 启动本机 Chrome 进程
@@ -672,30 +736,21 @@ def build_stealth_context_subprocess(p, fingerprint, proxy_settings, headless, v
         browser = p.chromium.connect_over_cdp(f'http://127.0.0.1:{port}')
         context = browser.contexts[0]
 
-        # 通过 CDP 设置 user-agent / 时区 / 设备指标
         page = context.pages[0] if context.pages else context.new_page()
-        cdp = context.new_cdp_session(page)
-        cdp.send('Emulation.setUserAgentOverride', {
-            'userAgent': fingerprint['user_agent'],
-            'platform': fingerprint['platform'],
-            'acceptLanguage': ','.join(fingerprint['languages']),
-        })
-        cdp.send('Emulation.setTimezoneOverride', {
-            'timezoneId': fingerprint['timezone_id'],
-        })
-        cdp.send('Emulation.setDeviceMetricsOverride', {
-            'width': fingerprint['screen_width'],
-            'height': viewport_height,
-            'deviceScaleFactor': fingerprint['device_pixel_ratio'],
-            'mobile': False,
-            'screenWidth': fingerprint['screen_width'],
-            'screenHeight': fingerprint['screen_height'],
-        })
-        proxy_auth_enabled = setup_proxy_auth(cdp, proxy_settings)
-        if not proxy_auth_enabled:
-            cdp.detach()
-        else:
-            browser._proxy_auth_cdp = cdp
+        apply_emulation = not is_native_fingerprint(fingerprint)
+        need_proxy_auth = bool(
+            str((proxy_settings or {}).get("username") or "").strip()
+            and str((proxy_settings or {}).get("password") or "")
+        )
+        if apply_emulation or need_proxy_auth:
+            cdp = context.new_cdp_session(page)
+            if apply_emulation:
+                _apply_spoofed_emulation(cdp, fingerprint, viewport_height)
+            proxy_auth_enabled = setup_proxy_auth(cdp, proxy_settings)
+            if not proxy_auth_enabled:
+                cdp.detach()
+            else:
+                browser._proxy_auth_cdp = cdp
 
         # 保存进程引用和临时目录以便后续清理
         browser._chrome_process = chrome_process

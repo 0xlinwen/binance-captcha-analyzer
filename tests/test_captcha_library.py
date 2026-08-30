@@ -90,12 +90,14 @@ class CaptchaLibraryTests(unittest.TestCase):
         self.assertIs(result, CaptchaSolveStatus.PASSED)
         self.assertEqual(calls, [CaptchaType.CHECKBOX, CaptchaType.CLICK])
 
-    def test_click_solver_requires_prompt_text(self) -> None:
+    def test_click_solver_returns_false_when_prompt_text_not_ready(self) -> None:
         page = Mock()
         page.query_selector.return_value = None
+        page.wait_for_function.side_effect = TimeoutError("timeout")
 
-        with self.assertRaisesRegex(RuntimeError, "提示文案"):
-            ClickCaptchaSolver().solve(page, Mock(), Mock(click_retry_per_cell=3), Mock())
+        solved = ClickCaptchaSolver().solve(page, Mock(), Mock(click_retry_per_cell=3), Mock())
+
+        self.assertFalse(solved)
 
     def test_click_solver_uses_enter_when_confirm_button_missing(self) -> None:
         page = Mock()

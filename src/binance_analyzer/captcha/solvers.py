@@ -154,18 +154,54 @@ class CheckboxCaptchaSolver(BaseCaptchaSolver):
         return False
 
 
+CLICK_PROMPT_SELECTORS = "#tagLabel, .bcap-text-message-title2"
+CLICK_PROMPT_WAIT_MS = 5000
+
+
+def _read_click_prompt_text(page) -> str:
+    prompt_element = page.query_selector(CLICK_PROMPT_SELECTORS)
+    if not prompt_element:
+        return ""
+    try:
+        return str(prompt_element.inner_text() or "").strip()
+    except Exception:
+        return ""
+
+
+def _wait_for_click_prompt_text(page, timeout_ms: int = CLICK_PROMPT_WAIT_MS) -> str:
+    """点击验证码图可能先出来，提示文案后到；空文案时等一会再读。"""
+    prompt_text = _read_click_prompt_text(page)
+    if prompt_text:
+        return prompt_text
+    waiter = getattr(page, "wait_for_function", None)
+    if callable(waiter):
+        try:
+            waiter(
+                """() => {
+                    const el = document.querySelector('#tagLabel, .bcap-text-message-title2');
+                    return !!(el && String(el.innerText || '').trim());
+                }""",
+                timeout=timeout_ms,
+            )
+        except Exception:
+            pass
+    else:
+        wait_timeout = getattr(page, "wait_for_timeout", None)
+        if callable(wait_timeout):
+            wait_timeout(min(timeout_ms, 800))
+    return _read_click_prompt_text(page)
+
+
 class ClickCaptchaSolver(BaseCaptchaSolver):
     """点击图片验证码 solver。"""
 
     captcha_type = CaptchaType.CLICK
 
     def solve(self, page, captcha_element, context: CaptchaSolveContext, ai_client: OpenRouterCaptchaClient) -> bool:
-        prompt_element = page.query_selector("#tagLabel, .bcap-text-message-title2")
-        if not prompt_element:
-            raise RuntimeError("点击验证码缺少提示文案元素: #tagLabel, .bcap-text-message-title2")
-        prompt_text = prompt_element.inner_text().strip()
+        prompt_text = _wait_for_click_prompt_text(page)
         if not prompt_text:
-            raise RuntimeError("点击验证码提示文案为空")
+            print("[WARNING] 点击验证码提示文案尚未加载完成，等待后重试")
+            return False
         screenshot_base64 = screenshot_to_base64(captcha_element.screenshot())
 
         result = ai_client.analyze_click_captcha(screenshot_base64, prompt_text)

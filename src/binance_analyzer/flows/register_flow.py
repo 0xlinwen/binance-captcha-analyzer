@@ -179,8 +179,18 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
     page.on("response", log_response)
 
     console_log(email_addr, "开始注册")
-    logger.info("打开注册页面...")
-    if not goto_with_retry(page, "https://accounts.binance.com/zh-CN/register", page_timeout=page_timeout):
+    register_config = config.get("register") or {}
+    warmup_url = str(register_config.get("warmup_url") or "").strip()
+    register_url = str(register_config.get("start_url") or "https://accounts.binance.com/zh-CN/register").strip()
+    if warmup_url:
+        logger.info("先访问站点首页以建立同站 Cookie: %s", warmup_url)
+        if not goto_with_retry(page, warmup_url, page_timeout=page_timeout):
+            console_log(email_addr, "注册预热页面加载失败", "error")
+            logger.error("注册预热页面加载失败: %s", warmup_url)
+            cleanup_listeners()
+            return AccountStatus.PROXY_FAILED
+    logger.info("打开注册页面: %s", register_url)
+    if not goto_with_retry(page, register_url, page_timeout=page_timeout):
         console_log(email_addr, "注册页面加载失败", "error")
         logger.error("注册页面加载失败")
         cleanup_listeners()

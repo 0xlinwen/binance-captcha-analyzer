@@ -11,7 +11,12 @@
   "mode": "login",
   "mode_options": ["login", "register"],
   "login": {"start_url": "https://accounts.binance.com/zh-CN/login"},
-  "register": {"submit_error_ack_max_attempts": 3},
+  "register": {
+    "start_url": "https://accounts.binance.com/zh-CN/register",
+    "warmup_url": "https://www.binance.com/zh-CN",
+    "submit_error_ack_max_attempts": 3
+  },
+  "fingerprint": {"mode": "native"},
   "creator_api": {"enabled": false, "max_accounts": 1, "slot_wait_timeout_sec": 600},
   "captcha": {"retry_mode": "fast", "max_attempts_per_round": 1, "max_rounds": 3, "cooldown_on_risk_min_sec": 30, "cooldown_on_risk_max_sec": 90, "click_retry_per_cell": 3},
   "mfa": {"submit_retry": 2, "email_verification_enabled": true, "not_registered_keywords": ["未注册", "账号不存在", "account does not exist", "not registered", "没有账号"]},

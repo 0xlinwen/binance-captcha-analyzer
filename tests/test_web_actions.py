@@ -37,6 +37,9 @@ class _NoEmailInputPage:
     def wait_for_timeout(self, timeout_ms: int) -> None:
         return None
 
+    def wait_for_selector(self, selector: str, **_kwargs):
+        raise TimeoutError(selector)
+
 
 class InputEmailTests(unittest.TestCase):
     @patch("binance_analyzer.automation.web_actions.dismiss_cookie_popup", return_value=False)
