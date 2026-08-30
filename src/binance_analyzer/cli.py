@@ -57,6 +57,9 @@ def process_account(args):
             last_status = status
             if status is AccountStatus.SUCCESS or status.is_terminal_without_retry:
                 return AccountResult(email_addr, password, status).to_process_tuple()
+            # 频率限制是当前账号的终态：不重复提交同一账号，由调度层换账号。
+            if status is AccountStatus.RATE_LIMITED:
+                return AccountResult(email_addr, password, status).to_process_tuple()
             if status.should_retry_proxy:
                 if attempt < max_retries - 1:
                     retry_action = "重试固定代理" if _is_static_proxy_mode(config) else "换代理重试"

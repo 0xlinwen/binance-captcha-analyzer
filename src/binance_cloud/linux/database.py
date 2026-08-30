@@ -792,11 +792,14 @@ class Database:
                 raise ValueError("回调代理租约不匹配")
             if payload.get("proxy_entry_id") and payload.get("proxy_entry_id") != item.get("proxy_entry_id"):
                 raise ValueError("回调代理 entry 不匹配")
-            retryable = status in {"retryable", "proxy_failed", "rate_limited"}
+            # frequency limit/208061 已明确表示当前账号终止；保存为 failed
+            # 以完成任务统计，同时保留 error_code=rate_limited 并结算代理失败。
+            # 普通 proxy_failed 继续支持换代理重试。
+            retryable = status in {"retryable", "proxy_failed"}
             if retryable:
                 retry_count = item["retry_count"] + 1
                 proxy_retry_count = item.get("proxy_retry_count", 0)
-                switch_retry = status in {"proxy_failed", "rate_limited"} and proxy_retry_count < 1
+                switch_retry = status == "proxy_failed" and proxy_retry_count < 1
                 stored_status = "retryable" if (retry_count < item["max_retries"] or switch_retry) else "failed"
                 completed_at = now if stored_status == "failed" else None
                 self.conn.execute(
@@ -804,13 +807,14 @@ class Database:
                     (stored_status, payload.get("error_code"), payload.get("error_message"), retry_count, 1 if switch_retry else 0, completed_at, item_id),
                 )
             else:
+                stored_status = "failed" if status == "rate_limited" else status
                 self.conn.execute(
                     "UPDATE login_job_items SET status=?, error_code=?, error_message=?, completed_at=?, lease_expires_at=NULL WHERE id=?",
-                    (status, payload.get("error_code"), payload.get("error_message"), now, item_id),
+                    (stored_status, payload.get("error_code"), payload.get("error_message"), now, item_id),
                 )
             if payload.get("lease_id"):
                 # 只有账号最终结束时才结算固定池失败；中间 retryable 不污染连续失败计数。
-                lease_result = status if (retryable and stored_status == "failed") else (stored_status if retryable else status)
+                lease_result = status if (status == "rate_limited" or (retryable and stored_status == "failed")) else (stored_status if retryable else status)
                 self.release_proxy_lease(payload["lease_id"], result_status=lease_result, release_reason="worker_callback")
             elif not had_lease and payload.get("worker_id"):
                 self.release_worker_slot(payload["worker_id"])
@@ -822,7 +826,7 @@ class Database:
                     WHERE excluded.credential_exported_at >= credentials.credential_exported_at""",
                     (item["account_id"], payload["cookie"], payload.get("csrftoken"), credential_exported_at, now, now))
             # 动态/直连模式按账号最终结果维护任务组连续失败；固定池使用 IP 链单独统计。
-            final_status = stored_status if retryable else status
+            final_status = stored_status if retryable or status == "rate_limited" else status
             if final_status in {"success", "already_registered"}:
                 self.conn.execute("UPDATE task_groups SET consecutive_failures=0 WHERE id=(SELECT task_group_id FROM login_jobs WHERE id=?)", (item["job_id"],))
             elif final_status == "failed":

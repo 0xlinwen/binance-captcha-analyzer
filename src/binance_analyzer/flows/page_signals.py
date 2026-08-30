@@ -56,6 +56,11 @@ PROXY_FAILURE_SIGNATURES = (
     "代理连接失败",
 )
 
+FREQUENCY_LIMIT_SIGNATURES = (
+    "frequency limit",
+    "208061",
+)
+
 RETRIABLE_SIGNATURES = (
     "300010",
 )
@@ -184,6 +189,11 @@ def has_proxy_failure_error(text: str) -> bool:
 def has_auth_failure_error(text: str) -> bool:
     """判断文本是否包含平台认证失败信号。"""
     return _contains_any(text, AUTH_FAILURE_SIGNATURES)
+
+
+def has_frequency_limit_error(text: str) -> bool:
+    """判断是否为平台频率限制弹窗，应立即结束当前账号流程。"""
+    return _contains_any(text, FREQUENCY_LIMIT_SIGNATURES)
 
 
 def assess_risk_text(text: str) -> RiskAssessment:

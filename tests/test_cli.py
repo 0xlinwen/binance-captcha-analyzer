@@ -223,8 +223,8 @@ class CliTests(unittest.TestCase):
 
     @patch("binance_analyzer.cli.time.sleep")
     @patch("binance_analyzer.cli.register_account")
-    def test_process_account_retries_rate_limited_as_proxy_session_failure(self, mock_register_account, mock_sleep) -> None:
-        mock_register_account.side_effect = [AccountStatus.RATE_LIMITED, AccountStatus.SUCCESS]
+    def test_process_account_stops_immediately_on_rate_limited(self, mock_register_account, mock_sleep) -> None:
+        mock_register_account.return_value = AccountStatus.RATE_LIMITED
 
         result = process_account(
             (
@@ -235,8 +235,8 @@ class CliTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result, ("alice@example.com", "pass1", AccountStatus.SUCCESS))
-        self.assertEqual(mock_register_account.call_count, 2)
+        self.assertEqual(result, ("alice@example.com", "pass1", AccountStatus.RATE_LIMITED))
+        self.assertEqual(mock_register_account.call_count, 1)
         self.assertEqual(mock_sleep.call_count, 0)
 
     @patch("binance_analyzer.cli.time.sleep")

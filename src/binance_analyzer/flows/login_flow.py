@@ -130,6 +130,12 @@ def login_with_url_state(page, email_addr, email_password, config, page_timeout=
                 logger.warning(msg)
                 logger.info(f"页面内容: {body_text[:500]}")
 
+                # 频率限制表示当前账号/IP不能继续提交，立即交给外层换账号/代理。
+                if _has_frequency_limit_error(body_text):
+                    console_log(email_addr, "检测到频率限制，停止当前账号", "error")
+                    logger.error("平台频率限制 (208061)，不再点击弹窗或重复提交")
+                    return AccountStatus.RATE_LIMITED
+
                 # CloudFront 403 等 CDN 层拦截，直接失败不重试
                 if risk.is_fatal:
                     console_log(email_addr, "CDN 403 拦截，IP 已被封禁，直接失败", "error")
