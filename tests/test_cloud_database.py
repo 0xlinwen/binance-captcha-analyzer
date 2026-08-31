@@ -250,6 +250,48 @@ class CloudDatabaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "不可重复"):
                 db.create_failed_items_retry_job(job["id"], [item["id"], item["id"]])
 
+    def test_failed_items_are_requeued_in_original_job_without_duplicate_registered_account(self):
+        with TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "state.db")
+            group = db.create_task_group()
+            job = db.create_job(
+                [
+                    {"email": "requeue@example.com", "password": "pw"},
+                    {"email": "registered@example.com", "password": "pw"},
+                ],
+                {"mode": "rotating_single_ip", "proxy_profile": "rotating_single_ip"},
+                task_mode="register",
+                task_group_id=group["id"],
+            )
+            items = db.get_job(job["id"])["items"]
+            for item in items:
+                db.mark_items_running(job["id"], "worker", 60)
+                db.save_callback({
+                    "job_id": job["id"], "job_item_id": item["id"], "account_id": item["account_id"],
+                    "worker_id": "worker", "status": "failed", "error_code": "register_failed",
+                })
+            db.conn.execute(
+                "UPDATE accounts SET registration_state='registered' WHERE id=?",
+                (items[1]["account_id"],),
+            )
+            db.refresh_task_group(group["id"])
+            db.mark_task_group_completion_notified(group["id"])
+            self.assertTrue(db.claim_notification_event(f"task-group-completion:{group['id']}"))
+
+            result = db.requeue_failed_items(job["id"])
+            self.assertEqual(result["job_id"], job["id"])
+            self.assertEqual(result["requeued_count"], 1)
+            self.assertEqual(result["resolved_registered_count"], 1)
+            updated = {item["id"]: item for item in db.get_job(job["id"])["items"]}
+            self.assertEqual(updated[items[0]["id"]]["status"], "queued")
+            self.assertIsNone(updated[items[0]["id"]]["error_code"])
+            self.assertEqual(updated[items[1]["id"]]["status"], "already_registered")
+            self.assertEqual(len(db.get_job(job["id"])["items"]), 2)
+            updated_group = db.task_group(group["id"])
+            self.assertEqual(updated_group["status"], "running")
+            self.assertEqual(updated_group["completion_notified"], 0)
+            self.assertTrue(db.claim_notification_event(f"task-group-completion:{group['id']}"))
+
     def test_task_group_cancels_pending_items_after_failure_threshold(self):
         with TemporaryDirectory() as temp:
             db = Database(Path(temp) / "state.db")

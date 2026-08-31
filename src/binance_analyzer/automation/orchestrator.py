@@ -391,5 +391,7 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                 stop_managed_proxy_runtime(proxy_runtime)
                 proxy_runtime = None
     finally:
+        # 浏览器启动阶段也可能抛异常；此时尚未进入内层收尾，仍须关闭 Gost。
+        stop_managed_proxy_runtime(proxy_runtime)
         if pool_manager and lease_id:
             pool_manager.release(lease_id, result_status=automation_result.status.value)

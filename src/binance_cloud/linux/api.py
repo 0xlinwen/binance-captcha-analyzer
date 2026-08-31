@@ -372,6 +372,20 @@ def retry_failed_items(job_id: str, request: FailedItemsRetryIn):
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/login-jobs/{job_id}/requeue-failed")
+def requeue_failed_items(job_id: str, request: FailedItemsRetryIn):
+    """在原任务中重派失败项，不创建新的 login job。"""
+    try:
+        if request.proxy is not None:
+            raise ValueError("原任务内重派不支持覆盖代理配置")
+        result = db.requeue_failed_items(job_id, request.job_item_ids)
+        if result["requeued_count"]:
+            db.mark_job_running(job_id)
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _dispatch_worker(payload: dict) -> None:
     targeted_dispatch_failure = False
     try:
