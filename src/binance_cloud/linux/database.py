@@ -576,6 +576,102 @@ class Database:
             update_accounts=False,
         )
 
+    def requeue_failed_items(self, job_id: str, item_ids: list[int] | None = None) -> dict:
+        """在原任务内重派最终失败项，避免创建重复任务。"""
+        with self._lock, self.conn:
+            job = self._one("SELECT * FROM login_jobs WHERE id=?", (job_id,))
+            if not job:
+                raise ValueError("任务不存在")
+            failed = self.conn.execute(
+                "SELECT id, account_id FROM login_job_items WHERE job_id=? AND status='failed' ORDER BY id",
+                (job_id,),
+            ).fetchall()
+            allowed_ids = {row["id"] for row in failed}
+            selected_ids = list(allowed_ids) if item_ids is None else item_ids
+            if not selected_ids:
+                raise ValueError("任务没有最终失败项")
+            if len(selected_ids) != len(set(selected_ids)):
+                raise ValueError("任务明细 ID 不可重复")
+            invalid_ids = [item_id for item_id in selected_ids if item_id not in allowed_ids]
+            if invalid_ids:
+                raise ValueError(f"仅可回退当前任务最终失败项: {invalid_ids}")
+
+            placeholders = ",".join("?" for _ in selected_ids)
+            selected = self.conn.execute(
+                f"SELECT id, account_id FROM login_job_items WHERE id IN ({placeholders})",
+                selected_ids,
+            ).fetchall()
+            account_ids = [row["account_id"] for row in selected]
+            account_placeholders = ",".join("?" for _ in account_ids)
+            registered_ids = {
+                row["id"]
+                for row in self.conn.execute(
+                    f"SELECT id FROM accounts WHERE id IN ({account_placeholders}) AND registration_state='registered'",
+                    account_ids,
+                ).fetchall()
+            }
+            pending_ids = {
+                row["account_id"]
+                for row in self.conn.execute(
+                    f"""SELECT DISTINCT account_id FROM login_job_items
+                         WHERE job_id<>? AND account_id IN ({account_placeholders})
+                           AND status IN ('queued', 'retryable', 'running')""",
+                    [job_id, *account_ids],
+                ).fetchall()
+            }
+            now = utc_now()
+            resolved_item_ids = [row["id"] for row in selected if row["account_id"] in registered_ids]
+            requeue_item_ids = [
+                row["id"] for row in selected
+                if row["account_id"] not in registered_ids and row["account_id"] not in pending_ids
+            ]
+            if resolved_item_ids:
+                marks = ",".join("?" for _ in resolved_item_ids)
+                self.conn.execute(
+                    f"""UPDATE login_job_items
+                           SET status='already_registered', error_code='already_registered',
+                               error_message='账号已在其他任务确认注册，跳过重派', completed_at=?,
+                               worker_id=NULL, lease_expires_at=NULL, lease_id=NULL, proxy_entry_id=NULL
+                         WHERE id IN ({marks})""",
+                    [now, *resolved_item_ids],
+                )
+            if requeue_item_ids:
+                marks = ",".join("?" for _ in requeue_item_ids)
+                self.conn.execute(
+                    f"""UPDATE login_job_items
+                           SET status='queued', proxy_address=NULL, error_code=NULL, error_message=NULL,
+                               started_at=NULL, completed_at=NULL, worker_id=NULL, lease_expires_at=NULL,
+                               retry_count=0, proxy_retry_count=0, lease_id=NULL, proxy_entry_id=NULL,
+                               dispatch_sequence=NULL
+                         WHERE id IN ({marks})""",
+                    requeue_item_ids,
+                )
+                if job.get("task_group_id"):
+                    self.conn.execute(
+                        "UPDATE task_groups SET status='running', completed_at=NULL, completion_notified=0 WHERE id=?",
+                        (job["task_group_id"],),
+                    )
+                    self.conn.execute(
+                        "DELETE FROM notification_events WHERE event_key=?",
+                        (f"task-group-completion:{job['task_group_id']}",),
+                    )
+            self._refresh_job_state(job_id, now)
+            if job.get("task_group_id"):
+                self.refresh_task_group(job["task_group_id"])
+            self.record_log(
+                "failed_items_requeued",
+                f"requeued={len(requeue_item_ids)} resolved_registered={len(resolved_item_ids)} "
+                f"skipped_pending={len(pending_ids)}",
+                job_id=job_id,
+                level="INFO",
+            )
+            return {
+                "job_id": job_id,
+                "requeued_count": len(requeue_item_ids),
+                "resolved_registered_count": len(resolved_item_ids),
+                "skipped_pending_count": len(pending_ids),
+            }
+
     def task_group(self, group_id: str):
         group = self._one("SELECT * FROM task_groups WHERE id=?", (group_id,))
         if group:
