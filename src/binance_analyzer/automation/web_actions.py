@@ -30,6 +30,109 @@ def _paste_text(page, text):
     time.sleep(random.uniform(0.1, 0.2))
 
 
+DIALOG_ACTION_TEXTS = (
+    "已知晓",
+    "Got it",
+    "继续",
+    "Continue",
+)
+
+_SSO_OR_PASSKEY_MARKERS = (
+    "通行密钥",
+    "passkey",
+    "google",
+    "apple",
+    "facebook",
+    "telegram",
+    "sign in with",
+    "continue with",
+)
+
+
+def visible_button_label(element) -> str:
+    """读取按钮可见文案，压缩空白后用于精确匹配。"""
+    try:
+        return " ".join(str(element.inner_text() or "").split())
+    except Exception:
+        return ""
+
+
+def is_sso_or_passkey_button(element) -> bool:
+    """通行密钥 / Google / Apple 等第三方入口，不能当成登录继续。"""
+    text = visible_button_label(element).lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _SSO_OR_PASSKEY_MARKERS)
+
+
+def button_label_equals(element, text: str) -> bool:
+    """整段文案相等才算命中，避免「使用通行密钥继续」匹配到「继续」。"""
+    label = visible_button_label(element)
+    wanted = str(text or "").strip()
+    if not label or not wanted:
+        return False
+    return label == wanted or label.lower() == wanted.lower()
+
+
+def is_unobscured_element(page, element) -> bool:
+    """判断按钮中心点是否就是该元素，避免点到弹窗后面的表单按钮。"""
+    try:
+        if not element or not element.is_visible():
+            return False
+        box = element.bounding_box()
+        if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+            return False
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        return bool(
+            element.evaluate(
+                """(el, point) => {
+                    const top = document.elementFromPoint(point.x, point.y);
+                    return !!top && (el === top || el.contains(top));
+                }""",
+                {"x": x, "y": y},
+            )
+        )
+    except Exception:
+        return False
+
+
+def click_without_scroll(page, element, timeout_ms: int = 2500) -> None:
+    """点击可见按钮，不触发 scrollIntoView。"""
+    box = None
+    try:
+        box = element.bounding_box()
+    except Exception:
+        box = None
+    if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        return
+    element.click(timeout=timeout_ms, force=True)
+
+
+def click_unobscured_button(page, texts) -> bool:
+    """点击当前最上层的指定按钮。被遮挡的同名按钮不会点，也不滚动页面。"""
+    for text in texts:
+        try:
+            buttons = page.query_selector_all(f"button:has-text('{text}')")
+        except Exception:
+            continue
+        if not isinstance(buttons, (list, tuple)):
+            continue
+        for btn in buttons:
+            if not is_unobscured_element(page, btn):
+                continue
+            if is_sso_or_passkey_button(btn) or not button_label_equals(btn, text):
+                continue
+            try:
+                click_without_scroll(page, btn)
+                logger.info(f"点击了未遮挡按钮: {text}")
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def click_button(scope, texts):
     """Click button containing any text inside scope(page/locator/element)."""
     try:
@@ -40,16 +143,29 @@ def click_button(scope, texts):
 
     for text in texts:
         try:
-            btn = scope.query_selector(f"button:has-text('{text}')")
-            if btn and btn.is_visible():
+            buttons = scope.query_selector_all(f"button:has-text('{text}')")
+        except Exception:
+            try:
+                btn = scope.query_selector(f"button:has-text('{text}')")
+                buttons = [btn] if btn else []
+            except Exception:
+                continue
+        if not isinstance(buttons, (list, tuple)):
+            continue
+        for btn in buttons:
+            try:
+                if not btn or not btn.is_visible():
+                    continue
+                if is_sso_or_passkey_button(btn) or not button_label_equals(btn, text):
+                    continue
                 try:
                     btn.click(timeout=5000)
                 except Exception:
                     btn.click(timeout=5000, force=True)
                 logger.info(f"点击了按钮: {text}")
                 return True
-        except Exception:
-            pass
+            except Exception:
+                continue
     return False
 
 
@@ -164,22 +280,17 @@ def click_login_continue_strict(page):
         "[data-testid='btn-submit']",
     ]
 
-    def _is_passkey_button(btn):
-        try:
-            txt = (btn.inner_text() or "").lower()
-            if "通行密钥" in txt or "passkey" in txt:
-                return True
-        except Exception:
-            pass
-        return False
-
     for selector in selectors:
         try:
             candidates = page.query_selector_all(selector)
             for btn in candidates:
                 if not btn or not btn.is_visible():
                     continue
-                if _is_passkey_button(btn):
+                if is_sso_or_passkey_button(btn):
+                    continue
+                if "has-text('继续')" in selector and not button_label_equals(btn, "继续"):
+                    continue
+                if "has-text('Continue')" in selector and not button_label_equals(btn, "Continue"):
                     continue
 
                 try:

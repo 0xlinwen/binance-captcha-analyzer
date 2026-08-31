@@ -160,6 +160,8 @@ def dismiss_global_modal(page: Page, logger: Optional[Any] = None) -> bool:
         "#globalmodal-common button:has-text('I Understand')",
         "#globalmodal-common button:has-text('Understand')",
         "#globalmodal-common button:has-text('已知晓')",
+        "#globalmodal-common button:has-text('继续')",
+        "#globalmodal-common button:has-text('Continue')",
         "#globalmodal-common button:has-text('确定')",
         "#globalmodal-common button:has-text('关闭')",
         "#globalmodal-common button:has-text('OK')",

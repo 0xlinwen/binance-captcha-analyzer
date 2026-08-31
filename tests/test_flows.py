@@ -74,8 +74,14 @@ class FlowUrlTests(unittest.TestCase):
         self.assertIs(reason, AccountStatus.AUTH_FAILED)
 
     @patch("binance_analyzer.flows.flows._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/login"))
-    @patch("binance_analyzer.flows.flows.click_button", return_value=True)
-    def test_auth_failure_continue_retries_three_times_before_fail(self, mock_click_button, _mock_wait) -> None:
+    @patch("binance_analyzer.flows.flows.click_login_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.flows.click_unobscured_button", return_value=True)
+    def test_auth_failure_continue_retries_three_times_before_fail(
+        self,
+        mock_click_dialog,
+        mock_click_continue,
+        _mock_wait,
+    ) -> None:
         page = Mock()
         page.url = "https://accounts.binance.com/zh-CN/login"
         body = Mock()
@@ -85,11 +91,18 @@ class FlowUrlTests(unittest.TestCase):
         recovered = _retry_auth_failure_continue(page, "alice@example.com", Mock())
 
         self.assertFalse(recovered)
-        self.assertEqual(mock_click_button.call_count, 3)
+        self.assertEqual(mock_click_dialog.call_count, 3)
+        self.assertEqual(mock_click_continue.call_count, 3)
 
     @patch("binance_analyzer.flows.flows._wait_for_page_response", return_value=("url_changed", "https://accounts.binance.com/zh-CN/login/password"))
-    @patch("binance_analyzer.flows.flows.click_button", return_value=True)
-    def test_auth_failure_continue_recovers_when_next_step_loads(self, mock_click_button, _mock_wait) -> None:
+    @patch("binance_analyzer.flows.flows.click_login_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.flows.click_unobscured_button", return_value=True)
+    def test_auth_failure_continue_recovers_when_next_step_loads(
+        self,
+        mock_click_dialog,
+        mock_click_continue,
+        _mock_wait,
+    ) -> None:
         page = Mock()
         page.url = "https://accounts.binance.com/zh-CN/login"
         body = Mock()
@@ -99,7 +112,29 @@ class FlowUrlTests(unittest.TestCase):
         recovered = _retry_auth_failure_continue(page, "alice@example.com", Mock())
 
         self.assertTrue(recovered)
-        self.assertEqual(mock_click_button.call_count, 1)
+        self.assertEqual(mock_click_dialog.call_count, 1)
+        self.assertEqual(mock_click_continue.call_count, 1)
+
+    @patch("binance_analyzer.flows.flows._wait_for_page_response", return_value=("captcha", "https://accounts.binance.com/zh-CN/register"))
+    @patch("binance_analyzer.flows.flows.click_register_continue_strict", return_value=True)
+    @patch("binance_analyzer.flows.flows.click_unobscured_button", return_value=True)
+    def test_auth_failure_continue_retries_register_submit_after_dialog(
+        self,
+        mock_click_dialog,
+        mock_click_register,
+        _mock_wait,
+    ) -> None:
+        page = Mock()
+        page.url = "https://accounts.binance.com/zh-CN/register"
+        body = Mock()
+        body.inner_text.return_value = "认证失败，请刷新页面后重试"
+        page.query_selector.return_value = body
+
+        recovered = _retry_auth_failure_continue(page, "alice@example.com", Mock())
+
+        self.assertTrue(recovered)
+        mock_click_dialog.assert_called_once()
+        mock_click_register.assert_called_once()
 
     @patch("binance_analyzer.flows.flows._wait_for_page_response", return_value=("timeout", "https://accounts.binance.com/zh-CN/login"))
     @patch("binance_analyzer.flows.flows.click_login_continue_strict", return_value=True)

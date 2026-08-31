@@ -7,12 +7,16 @@ from ..captcha.service import CaptchaService
 from ..captcha.types import CaptchaSolveStatus
 from ..integrations.email_imap import get_initial_mail_count, get_login_password, handle_email_verification
 from ..automation.web_actions import (
+    DIALOG_ACTION_TEXTS,
     click_button,
     click_register_continue_strict,
     click_login_continue_strict,
+    click_unobscured_button,
+    click_without_scroll,
     goto_with_retry,
     input_email,
     input_password,
+    is_unobscured_element,
     need_register,
 )
 from ..runtime.logger import get_logger_manager
@@ -21,7 +25,6 @@ from ..constants import (
     MAX_CAPTCHA_FAILS,
 )
 from .page_signals import (
-    AUTH_FAILURE_CONTINUE_BUTTONS,
     DASHBOARD_URL,
     RETRIABLE_SIGNATURES,
     assess_risk_text,
@@ -209,8 +212,16 @@ def _get_body_text(page) -> str:
             return ""
 
 
+def _retry_form_continue(page) -> bool:
+    """弹窗关闭后，点击当前页的登录/注册继续按钮以重新提交。"""
+    url = str(getattr(page, "url", "") or "")
+    if "/register" in url:
+        return click_register_continue_strict(page)
+    return click_login_continue_strict(page)
+
+
 def _retry_auth_failure_continue(page, email_addr, logger=None, max_attempts=AUTH_FAILURE_MAX_CONTINUE_ATTEMPTS) -> bool:
-    """点击认证失败提示，用于验证码服务返回认证失败后的继续检查。"""
+    """先关闭认证失败弹窗，再点登录/注册继续重试。"""
     for attempt in range(1, max(1, int(max_attempts)) + 1):
         body_text = _get_body_text(page)
         if not _has_auth_failure_error(body_text):
@@ -221,11 +232,16 @@ def _retry_auth_failure_continue(page, email_addr, logger=None, max_attempts=AUT
             logger.warning(f"认证失败提示，点击继续重试 {attempt}/{max_attempts}")
 
         url_before = page.url
-        clicked = click_button(page, AUTH_FAILURE_CONTINUE_BUTTONS)
+        clicked = click_unobscured_button(page, DIALOG_ACTION_TEXTS)
         if not clicked:
             clicked = _dismiss_error_popup(page, logger)
         if not clicked and logger:
             logger.warning("认证失败提示未找到可点击按钮")
+
+        if not _retry_form_continue(page):
+            if logger:
+                logger.error("认证失败提示关闭后，继续按钮点击失败")
+            return False
 
         response_type, _ = _wait_for_page_response(page, url_before, timeout_ms=5000, logger=logger)
         body_after = _get_body_text(page)
@@ -525,9 +541,11 @@ def _dismiss_error_popup(page, logger=None):
     except Exception:
         pass
 
+    if click_unobscured_button(page, DIALOG_ACTION_TEXTS):
+        page.wait_for_timeout(random.randint(800, 1200))
+        return True
+
     dismiss_btns = [
-        "button:has-text('已知晓')",
-        "button:has-text('Got it')",
         "button:has-text('OK')",
         "button:has-text('确定')",
         "button:has-text('关闭')",
@@ -541,18 +559,32 @@ def _dismiss_error_popup(page, logger=None):
     ]
     for selector in dismiss_btns:
         try:
-            btn = page.query_selector(selector)
-            if btn and btn.is_visible():
-                btn.click()
+            buttons = page.query_selector_all(selector)
+        except Exception:
+            try:
+                btn = page.query_selector(selector)
+                buttons = [btn] if btn else []
+            except Exception as e:
+                msg = f"点击按钮 {selector} 失败: {e}"
+                if logger:
+                    logger.info(msg)
+                continue
+        if not isinstance(buttons, (list, tuple)):
+            continue
+        for btn in buttons:
+            try:
+                if not btn or not btn.is_visible() or not is_unobscured_element(page, btn):
+                    continue
+                click_without_scroll(page, btn)
                 msg = f"点击了关闭按钮: {selector}"
                 if logger:
                     logger.info(msg)
                 page.wait_for_timeout(random.randint(800, 1200))
                 return True
-        except Exception as e:
-            msg = f"点击按钮 {selector} 失败: {e}"
-            if logger:
-                logger.info(msg)
+            except Exception as e:
+                msg = f"点击按钮 {selector} 失败: {e}"
+                if logger:
+                    logger.info(msg)
     return False
 
 
