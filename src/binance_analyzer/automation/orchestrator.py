@@ -8,13 +8,10 @@ from playwright.sync_api import sync_playwright
 from .automation_driver import build_driver
 from ..storage.registered_account_storage import save_registered_account
 from ..runtime.local_cache import init_cache_manager
-from ..fingerprint import describe_fingerprint, generate_fingerprint, is_native_fingerprint
 from .cache_routes import handle_cache_route, track_cache_response
 from .browser_context import (
-    build_stealth_context,
-    build_stealth_init_script,
+    build_browser_context,
     cleanup_subprocess_browser,
-    get_launch_args,
 )
 from ..integrations.local_proxy_pool import bind_local_rotating_proxy
 from ..integrations.proxy_integration import (
@@ -56,7 +53,6 @@ def warmup_cache(proxy_config=None, headless=True):
     print("预热浏览器缓存...")
     MASTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     init_cache_manager(CACHE_DIR)
-    fingerprint = generate_fingerprint(use_real_profile=True, mode="native")
     proxy_runtime = None
     proxy_settings = None
     base_dir = PROJECT_ROOT
@@ -98,28 +94,8 @@ def warmup_cache(proxy_config=None, headless=True):
                 ],
                 "proxy": proxy_settings,
             }
-            if not is_native_fingerprint(fingerprint):
-                launch_kwargs["args"] = get_launch_args(
-                    fingerprint["screen_width"], fingerprint["screen_height"]
-                )
-                launch_kwargs.update(
-                    user_agent=fingerprint["user_agent"],
-                    locale=fingerprint["locale"],
-                    timezone_id=fingerprint["timezone_id"],
-                    viewport={
-                        "width": fingerprint["screen_width"],
-                        "height": fingerprint["screen_height"] - 80,
-                    },
-                    screen={
-                        "width": fingerprint["screen_width"],
-                        "height": fingerprint["screen_height"],
-                    },
-                    device_scale_factor=fingerprint["device_pixel_ratio"],
-                )
             context = p.chromium.launch_persistent_context(**launch_kwargs)
             try:
-                if not is_native_fingerprint(fingerprint):
-                    context.add_init_script(build_stealth_init_script(fingerprint))
                 page = context.new_page()
                 page.route("**/*", handle_cache_route)
                 page.on("response", track_cache_response)
@@ -256,10 +232,6 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
 
     try:
         with sync_playwright() as p:
-            fingerprint_mode = str((config.get("fingerprint") or {}).get("mode") or "native").strip().lower()
-            fingerprint = generate_fingerprint(use_real_profile=False, mode=fingerprint_mode)
-            print(f"[Worker-{worker_id}] 指纹: {describe_fingerprint(fingerprint)}")
-
             proxy_settings = None
             if proxy_enabled:
                 runtime_proxy, pool_manager, lease_id = bind_local_rotating_proxy(base_dir, proxy_config)
@@ -287,9 +259,8 @@ def register_account(base_dir: Path, email_addr: str, email_password: str, confi
                     automation_result = AutomationResult.from_status(AccountStatus.PROXY_FAILED)
                     return automation_result
 
-            browser_mode_label = "native 真实身份" if is_native_fingerprint(fingerprint) else "spoofed 伪装指纹"
-            print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（{browser_mode_label}）")
-            browser, context, page = build_stealth_context(p, fingerprint, proxy_settings, headless)
+            print(f"[Worker-{worker_id}] 浏览器配置: {mode}模式（本机 Chrome 真实身份）")
+            browser, context, page = build_browser_context(p, proxy_settings, headless)
 
             # ── 修复: 初始化缓存（之前只在 warmup_cache 里初始化，register_account 里从未调用）
             if config.get("cache", {}).get("enabled", False):

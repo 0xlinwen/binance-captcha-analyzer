@@ -44,8 +44,7 @@ curl http://127.0.0.1:8100/health
 - IMAP 自动提取邮箱 MFA 验证码（支持 Outlook API 拉码）
 - 多进程并发处理多个账号
 - 本地静态资源缓存（减少网络流量）
-- 浏览器指纹随机化（Mac Apple Silicon 配置池）
-- 完整反检测脚本注入（WebGL/屏幕/硬件/媒体设备伪造）
+- 本机 Google Chrome 真实身份（不伪造 UA/时区/WebGL/屏幕）
 - 自动提取 Cookie 和 CSRF Token
 - 成功/失败账号分类日志
 
@@ -90,9 +89,9 @@ Linux Cloud API ─────────────────────�
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │               orchestrator.py (编排器)                    │
-│     浏览器启动 / 缓存管理 / Cookie提取 / 反检测注入        │
+│     浏览器启动 / 缓存管理 / Cookie提取                    │
 │                                                         │
-│  登录/注册模式:  完整反检测配置 + WebGL 伪造              │
+│  登录/注册模式:  本机 Chrome 真实身份                     │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -159,7 +158,6 @@ src/binance_analyzer/
     logger.py
     local_cache.py
     traffic_monitor.py
-  fingerprint.py                       # 浏览器指纹随机化（UA/时区/WebGL）
   constants.py                         # 全局常量（超时、重试、日志格式等）
   utils.py                             # 工具函数（重试策略、弹窗处理、文件名清理）
   exceptions.py                        # 自定义异常层级（可重试/不可重试分类）
@@ -654,12 +652,7 @@ gost -L=http://:8888 -F=http://PROXY_USERNAME:PROXY_PASSWORD@proxy-bootstrap.exa
 | 特性 | 登录模式 | 注册模式 |
 |------|----------|----------|
 | 浏览器启动 | subprocess + `connect_over_cdp()` | subprocess + `connect_over_cdp()` |
-| 反检测脚本 | 完整 11 项伪造 | 完整 11 项伪造 |
-| User-Agent | 随机 Chrome 138-145 | 随机 Chrome 138-145 |
-| 视口大小 | 随机（基于指纹配置） | 随机（基于指纹配置） |
-| 时区/语言 | 随机 | 随机 |
-| WebGL 伪造 | 随机 Mac Apple Silicon 显卡 | 随机 Mac Apple Silicon 显卡 |
-| 屏幕/硬件伪造 | 完整伪造 | 完整伪造 |
+| 浏览器身份 | 本机 Chrome 真实 UA/时区/WebGL/屏幕 | 本机 Chrome 真实 UA/时区/WebGL/屏幕 |
 | 输入方式 | `insert_text()` 粘贴式 | `insert_text()` 粘贴式 |
 
 ### 浏览器启动方式
@@ -667,9 +660,9 @@ gost -L=http://:8888 -F=http://PROXY_USERNAME:PROXY_PASSWORD@proxy-bootstrap.exa
 使用 subprocess 直接启动 Playwright 内置 Chromium，不经过 `chromium.launch()`，避免 Playwright 自动注入 `--enable-automation` 等 30+ 自动化标志：
 
 ```python
-# browser_context.py - build_stealth_context()
+# browser_context.py - build_browser_context()
 cmd = [
-    chromium_path,                                    # Playwright 内置 Chromium
+    chrome_path,                                      # 本机 Google Chrome
     f'--remote-debugging-port={port}',
     f'--user-data-dir={user_data_dir}',
     '--disable-blink-features=AutomationControlled',  # 禁用自动化特征
@@ -711,50 +704,9 @@ page.keyboard.insert_text(email_addr)  # 等同于粘贴
 | `fill()` | JS 直接设置 value | 无键盘事件 | 高（无事件链） |
 | `insert_text()` | 一次性插入 | input 事件，isTrusted=true | 低（等同粘贴） |
 
-### 指纹随机化
+### 浏览器身份
 
-每个 worker 启动时生成随机指纹，避免多窗口被关联检测：
-
-```python
-# fingerprint.py
-CHROME_VERSIONS = ['138.0.0.0', '140.0.0.0', '141.0.0.0', '142.0.0.0',
-                   '143.0.0.0', '144.0.0.0', '145.0.0.0']
-
-TIMEZONES = ['Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Singapore']
-
-LOCALES = ['zh-CN', 'en-US', 'zh-TW']
-
-# 4 种 Mac Apple Silicon 配置
-FINGERPRINT_PROFILES = [
-    'mac_m4_real'   # M4, 10核, 1470x956, DPR=2
-    'mac_m1_8core'  # M1, 8核,  1440x900, DPR=2
-    'mac_m2_8core'  # M2, 8核,  1512x982, DPR=2
-    'mac_m3_pro'    # M3 Pro, 12核, 1512x982, DPR=2
-]
-```
-
-启动时会打印指纹信息：
-```
-[Worker-0] 指纹: UA=...Chrome/142.0.0.0 Safari/537.36 | TZ=Asia/Hong_Kong | Screen=1512x982 | DPR=2
-```
-
-### 反检测脚本（11 项）
-
-登录和注册模式均注入完整的反检测初始化脚本：
-
-| # | 伪造项 | 说明 |
-|---|--------|------|
-| 1 | `navigator.webdriver` | 设为 undefined，隐藏自动化标识 |
-| 2 | `navigator.platform` | 伪造为 MacIntel |
-| 3 | `navigator.language/languages` | 随机多语言数组 |
-| 4 | 硬件信息 | `hardwareConcurrency` + `deviceMemory` |
-| 5 | 屏幕信息 | width/height/availWidth/availHeight/colorDepth/pixelDepth/DPR |
-| 6 | `window.chrome` | 完整伪造 runtime/loadTimes/csi/app |
-| 7 | Permissions API | 修复 notifications 状态查询 |
-| 8 | WebGL | 完整伪造 vendor/renderer（含 OffscreenCanvas + Worker） |
-| 9 | Canvas 噪声 | frame-aware seed 扰动（toDataURL/toBlob/getImageData） |
-| 10 | 媒体设备 | 伪造摄像头/麦克风/扬声器 |
-| 11 | Automation 属性 | 删除 cdc_ 前缀变量 |
+登录和注册都使用本机 Google Chrome 的真实 UA、Client Hints、WebGL、屏幕和语言，不再注入伪造脚本，也不再覆盖 CDP UA/时区/分辨率。若配置里仍写 `fingerprint.mode=spoofed`，启动会直接报错。
 
 ### 缓存预热模式
 

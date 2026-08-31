@@ -71,6 +71,17 @@ def _config_for_task(proxy: dict, mode: str) -> dict:
             static["username"] = parsed.username
         if parsed.password is not None:
             static["password"] = parsed.password
+        # Cloud 固定池已在 Linux 侧完成 IP 领取。此处只消费当前租约
+        # 的固定地址，不能把本地 rotating profile 的池管理字段传给
+        # 代理运行时，否则会被严格配置校验拒绝。
+        for key in (
+            "pool_file",
+            "allow_parallel",
+            "cooldown_seconds",
+            "switch_after_account_failures",
+            "switch_after_consecutive_account_failures",
+        ):
+            configured.pop(key, None)
         configured.update({"enabled": True, "mode": "static", "static": static})
     elif proxy_mode == "dynamic":
         if str(configured.get("mode") or "").strip().lower() != "dynamic":

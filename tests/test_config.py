@@ -203,15 +203,32 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config["register"]["submit_error_ack_max_attempts"], 3)
             self.assertEqual(config["register"]["start_url"], "https://accounts.binance.com/zh-CN/register")
             self.assertEqual(config["register"]["warmup_url"], "https://www.binance.com/zh-CN")
-            self.assertEqual(config["fingerprint"]["mode"], "native")
+            self.assertNotIn("fingerprint", config)
+
+    def test_load_config_rejects_spoofed_fingerprint_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir, fingerprint={"mode": "spoofed"})
+
+            with self.assertRaisesRegex(ValueError, "伪装路径已移除"):
+                load_config(base_dir)
 
     def test_load_config_rejects_invalid_fingerprint_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             _write_config(base_dir, fingerprint={"mode": "random"})
 
-            with self.assertRaisesRegex(ValueError, "fingerprint.mode"):
+            with self.assertRaisesRegex(ValueError, "伪装路径已移除"):
                 load_config(base_dir)
+
+    def test_load_config_accepts_legacy_native_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            _write_config(base_dir, fingerprint={"mode": "native"})
+
+            config = load_config(base_dir)
+
+            self.assertEqual(config["fingerprint"]["mode"], "native")
 
     def test_load_config_allows_empty_register_warmup_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

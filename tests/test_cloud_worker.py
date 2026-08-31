@@ -27,6 +27,27 @@ class CloudWorkerConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "dynamic profile"):
                 worker._config_for_task({"mode": "dynamic"}, "login")
 
+    def test_fixed_cloud_lease_strips_local_pool_fields(self):
+        profile = {
+            "enabled": True,
+            "mode": "rotating_single_ip",
+            "pool_file": "config/proxy_pool.txt",
+            "allow_parallel": True,
+            "cooldown_seconds": 3600,
+            "switch_after_account_failures": 3,
+            "gost": {"binary": "gost"},
+        }
+        with patch("binance_cloud.windows.worker.load_config", return_value={"proxy": profile, "mode": "login"}):
+            worker.CONFIG = None
+            config = worker._config_for_task(
+                {"mode": "fixed", "address": "socks5://user:pass@127.0.0.1:1080"},
+                "register",
+            )
+        self.assertEqual(config["proxy"]["mode"], "static")
+        self.assertEqual(config["proxy"]["static"]["host"], "127.0.0.1")
+        for key in ("pool_file", "allow_parallel", "cooldown_seconds", "switch_after_account_failures"):
+            self.assertNotIn(key, config["proxy"])
+
     def test_lease_metadata_requires_entry_and_profile(self):
         with self.assertRaisesRegex(ValueError, "proxy_entry_id"):
             worker._validate_lease_metadata(

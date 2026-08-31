@@ -602,19 +602,19 @@ def register_with_url_state(page, email_addr, email_password, config, page_timeo
             logger.info("register - 输入邮箱")
             url_before = url
 
-            # 模拟真实用户行为：贝塞尔曲线鼠标移动
-            try:
-                for _ in range(random.randint(2, 4)):
-                    x = random.randint(100, 800)
-                    y = random.randint(100, 600)
-                    _bezier_mouse_move(page, x, y)
-                    page.wait_for_timeout(random.randint(200, 500))
+            # 弹窗在时不滚动，避免 已知晓/继续 框跟着页面上下跳。
+            if not _has_visible_register_ack_button(page):
+                try:
+                    for _ in range(random.randint(2, 4)):
+                        x = random.randint(100, 800)
+                        y = random.randint(100, 600)
+                        _bezier_mouse_move(page, x, y)
+                        page.wait_for_timeout(random.randint(200, 500))
 
-                # 随机滚动页面
-                page.evaluate(f"window.scrollBy(0, {random.randint(-50, 50)})")
-                page.wait_for_timeout(random.randint(300, 800))
-            except Exception:
-                pass
+                    page.evaluate(f"window.scrollBy(0, {random.randint(-50, 50)})")
+                    page.wait_for_timeout(random.randint(300, 800))
+                except Exception:
+                    pass
 
             if _register_email_matches(page, email_addr) and _has_visible_register_ack_button(page):
                 if _retry_register_submit_ack_error(page, email_addr, logger, submit_error_ack_max_attempts):

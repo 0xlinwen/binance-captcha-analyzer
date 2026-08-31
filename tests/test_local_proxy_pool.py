@@ -141,27 +141,16 @@ class LocalFixedProxyPoolTests(unittest.TestCase):
 
 
 class OrchestratorRotatingPoolTests(unittest.TestCase):
-    @patch("binance_analyzer.automation.orchestrator.build_stealth_context")
+    @patch("binance_analyzer.automation.orchestrator.build_browser_context")
     @patch("binance_analyzer.automation.orchestrator.create_proxy_runtime")
-    @patch("binance_analyzer.automation.orchestrator.generate_fingerprint")
     @patch("binance_analyzer.automation.orchestrator.sync_playwright")
     def test_register_account_returns_proxy_failed_when_pool_empty(
         self,
         mock_sync_playwright,
-        mock_generate_fingerprint,
         mock_create_proxy_runtime,
-        mock_build_stealth_context,
+        mock_build_browser_context,
     ) -> None:
         mock_sync_playwright.return_value.__enter__.return_value = Mock()
-        mock_generate_fingerprint.return_value = {
-            "mode": "native",
-            "user_agent": "",
-            "timezone_id": "",
-            "screen_width": 0,
-            "screen_height": 0,
-            "device_pixel_ratio": 0,
-            "languages": [],
-        }
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             proxy_config = _write_pool(base_dir, ["socks5://user:pass@1.1.1.1:1000"])
@@ -183,7 +172,7 @@ class OrchestratorRotatingPoolTests(unittest.TestCase):
         self.assertIsInstance(result, AutomationResult)
         self.assertIs(result.status, AccountStatus.PROXY_FAILED)
         mock_create_proxy_runtime.assert_not_called()
-        mock_build_stealth_context.assert_not_called()
+        mock_build_browser_context.assert_not_called()
 
 
 if __name__ == "__main__":

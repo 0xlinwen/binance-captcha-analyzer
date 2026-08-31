@@ -234,16 +234,15 @@ def _normalize_register_config(config: dict) -> None:
 
 
 def _normalize_fingerprint_config(config: dict) -> None:
+    """伪装指纹已移除。遗留 fingerprint.mode=spoofed 必须 fail-fast。"""
+    if "fingerprint" not in config:
+        return
     fingerprint = config.get("fingerprint")
-    if fingerprint is None:
-        fingerprint = {}
-        config["fingerprint"] = fingerprint
     if not isinstance(fingerprint, dict):
         raise ValueError("配置 fingerprint 必须是对象")
     mode = str(fingerprint.get("mode") or "native").strip().lower()
-    if mode not in {"native", "spoofed"}:
-        raise ValueError("配置 fingerprint.mode 只支持 native/spoofed")
-    fingerprint["mode"] = mode
+    if mode != "native":
+        raise ValueError("fingerprint 伪装路径已移除，当前只使用本机 Chrome 真实身份")
 
 
 def _normalize_creator_api_config(config: dict) -> None:
